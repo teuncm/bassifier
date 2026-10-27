@@ -1,6 +1,9 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { oscillationSamples, smoothTrace, tracePath } from "../oscilloscope.js";
+import { oscillationSamples, smoothTrace } from "../oscilloscope.js";
+
+import { createFrameLoop } from "../frame-loop.js";
+import { createGpuTrace } from "../gpu-trace.js";
 
 const props = defineProps({
   analyser: Object,
@@ -8,18 +11,19 @@ const props = defineProps({
   context: Object,
   playing: Boolean,
 });
-const root = ref(null), trace = ref(null), glow = ref(null);
-let frame = 0, visible = true, observer, samples, target, display,
+const root = ref(null), trace = ref(null);
+let renderer;
+const flatline = Float32Array.of(0, 42, 720, 42);
+let points, pointCount = 0;
+const loop = createFrameLoop(draw);
+let visible = true, observer, samples, target, display,
   lastDraw = -Infinity, lastFrame = null;
-function setTrace(path) {
-  trace.value.setAttribute("d", path);
-  glow.value.setAttribute("d", path);
-}
 function draw(timestamp = performance.now()) {
-  cancelAnimationFrame(frame);
-  if (!trace.value) return;
+  if (!renderer) return;
   if (!props.playing || !props.voice || !props.analyser || !props.context) {
-    setTrace("M0,42 L720,42");
+    loop.stop();
+    renderer.draw(flatline);
+    trace.value.dataset.state = "silent";
     root.value.removeAttribute("data-window-seconds");
     lastDraw = -Infinity;
     target = display = null;
@@ -27,8 +31,15 @@ function draw(timestamp = performance.now()) {
     return;
   }
   if (!visible || document.hidden) {
+    loop.stop();
     lastFrame = null;
     return;
+  }
+  const count = Math.min(512, Math.max(128, Math.ceil(renderer.width)));
+  if (count !== pointCount) {
+    pointCount = count; points = new Float32Array(count * 2);
+    for (let i = 0; i < count; i++) points[i * 2] = i / (count - 1) * 720;
+    target = display = null; lastDraw = -Infinity;
   }
   const frequency = props.voice.frequency;
   const windowSeconds = 2 / frequency;
@@ -38,42 +49,50 @@ function draw(timestamp = performance.now()) {
     const size = props.analyser.fftSize;
     if (samples?.length !== size) samples = new Float32Array(size);
     props.analyser.getFloatTimeDomainData(samples);
-    target = oscillationSamples(samples, props.context.sampleRate, frequency, props.voice.phase, 512, target ?? undefined);
+    target = oscillationSamples(samples, props.context.sampleRate, frequency, props.voice.phase, pointCount, target ?? undefined);
     if (!display) display = target.slice();
-    root.value.setAttribute("data-window-seconds", windowSeconds);
+    if (root.value.dataset.windowSeconds !== String(windowSeconds))
+      root.value.setAttribute("data-window-seconds", windowSeconds);
     lastDraw = now;
   }
   if (target) {
     smoothTrace(display, target, lastFrame === null ? 0 : (timestamp - lastFrame) / 1000);
-    setTrace(tracePath(display));
+    for (let i = 0; i < display.length; i++) points[i * 2 + 1] = 42 - display[i] * 152;
+    renderer.draw(points);
+    if (trace.value.dataset.state !== "live") trace.value.dataset.state = "live";
   }
   lastFrame = timestamp;
-  frame = requestAnimationFrame(draw);
 }
 watch(() => [props.voice, props.playing, props.analyser], () => {
   lastDraw = -Infinity;
   target = display = null;
   lastFrame = null;
-  draw();
+  resume();
 }, { flush: "post" });
 onMounted(() => {
+  renderer = createGpuTrace(trace.value, 84, true);
+  draw();
+  document.addEventListener("visibilitychange", resume);
   observer = new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
-    if (visible) draw();
-    else cancelAnimationFrame(frame);
+    if (visible) resume();
+    else loop.stop();
   });
   observer.observe(root.value);
 });
+function resume() {
+  draw();
+  if (props.playing && props.voice && visible && !document.hidden) loop.start();
+}
 onBeforeUnmount(() => {
-  cancelAnimationFrame(frame);
+  document.removeEventListener("visibilitychange", resume);
+  loop.stop();
+  renderer?.dispose();
   observer?.disconnect();
 });
 </script>
 <template>
   <div ref="root" class="waveform" role="img" aria-label="Live oscillation of the current bass sound">
-    <svg viewBox="0 0 720 84" preserveAspectRatio="none" aria-hidden="true">
-      <path ref="glow" d="M0,42 L720,42" class="waveform-glow" />
-      <path ref="trace" d="M0,42 L720,42" class="waveform-trace" />
-    </svg>
+    <canvas ref="trace" class="waveform-trace" aria-hidden="true" />
   </div>
 </template>

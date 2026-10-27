@@ -1,25 +1,32 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref, watch } from "vue";
 
-import { spectrumFftSize, spectrumPath } from "../spectrum.js";
+import { spectrumFftSize, spectrumPoints } from "../spectrum.js";
+
+import { createFrameLoop } from "../frame-loop.js";
+import { createGpuTrace } from "../gpu-trace.js";
 
 const props = defineProps({ analyser: Object, context: Object, playing: Boolean });
 const root = ref(null), trace = ref(null);
-let frame, observer, samples, source, analyser, visible = true;
+const mobile = window.matchMedia("(max-width: 1023px)");
+const loop = createFrameLoop(draw, () => mobile.matches ? 30 : 60);
+let observer, samples, source, analyser, points, renderer, visible = true, lastAudioTime = -Infinity;
+const flatline = Float32Array.of(0, 90, 720, 90);
 function disconnect() {
   if (source && analyser) source.disconnect(analyser);
   analyser?.disconnect();
-  source = analyser = null;
+  source = analyser = null; lastAudioTime = -Infinity;
 }
 function draw() {
-  cancelAnimationFrame(frame);
-  if (!trace.value) return;
+  if (!renderer) return;
   if (!props.playing || !props.analyser || !props.context) {
+    loop.stop();
     disconnect();
-    trace.value.setAttribute("d", "M0,90H720");
+    renderer.draw(flatline);
+    trace.value.dataset.state = "silent";
     return;
   }
-  if (!visible || document.hidden) return;
+  if (!visible || document.hidden) { loop.stop(); return; }
   if (source !== props.analyser) {
     disconnect();
     source = props.analyser;
@@ -29,25 +36,35 @@ function draw() {
     source.connect(analyser);
     samples = new Float32Array(analyser.frequencyBinCount);
   }
+  if (props.context.currentTime === lastAudioTime) return;
+  lastAudioTime = props.context.currentTime;
   analyser.getFloatFrequencyData(samples);
-  trace.value.setAttribute("d", spectrumPath(samples, props.context.sampleRate));
-  frame = requestAnimationFrame(draw);
+  const columns = Math.max(128, Math.min(720, Math.ceil(renderer.width)));
+  points = spectrumPoints(samples, props.context.sampleRate, points, columns);
+  renderer.draw(points);
+  if (trace.value.dataset.state !== "live") trace.value.dataset.state = "live";
 }
-function resume() { draw(); }
-watch(() => [props.analyser, props.context, props.playing], () => {
+function resume() {
   draw();
+  if (props.playing && props.analyser && visible && !document.hidden) loop.start();
+}
+watch(() => [props.analyser, props.context, props.playing], () => {
+  resume();
 }, { flush: "post" });
 onMounted(() => {
+  renderer = createGpuTrace(trace.value, 94);
+  draw();
   observer = new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
-    if (visible) draw();
-    else cancelAnimationFrame(frame);
+    if (visible) resume();
+    else loop.stop();
   });
   observer.observe(root.value);
   document.addEventListener("visibilitychange", resume);
 });
 onBeforeUnmount(() => {
-  cancelAnimationFrame(frame);
+  loop.stop();
+  renderer?.dispose();
   observer?.disconnect();
   disconnect();
   document.removeEventListener("visibilitychange", resume);
@@ -56,8 +73,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="root" class="fft-display" role="img" aria-label="Live frequency spectrum, logarithmic frequency scale">
-    <svg viewBox="0 0 720 94" preserveAspectRatio="none" aria-hidden="true">
-      <path ref="trace" d="M0,90H720" class="fft-trace" />
-    </svg>
+    <canvas ref="trace" class="fft-trace" aria-hidden="true" />
   </div>
 </template>

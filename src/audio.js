@@ -42,20 +42,12 @@ export function driveSample(input, drive) {
   return parabolicSample(input * 10 ** (db / 20));
 }
 
-const driveCurves = new Map();
-function driveCurve(drive) {
-  const key = drive;
-  if (!driveCurves.has(key)) {
-    driveCurves.set(
-      key,
-      Float32Array.from({ length: 16385 }, (_, i) =>
-        driveSample(i / 8192 - 1, drive),
-      ),
-    );
-    if (driveCurves.size > 8)
-      driveCurves.delete(driveCurves.keys().next().value);
-  }
-  return driveCurves.get(key);
+// Gain is an AudioParam: drive edits no longer allocate/copy a new curve.
+const parabolicCurve = Float32Array.from({ length: 16385 }, (_, i) =>
+  parabolicSample(i / 8192 - 1),
+);
+function driveGain(drive) {
+  return 10 ** (Math.max(parameters.drive.min, Math.min(parameters.drive.max, drive)) / 20);
 }
 const limitCurve = Float32Array.from({ length: 16385 }, (_, i) => {
   const x = i / 8192 - 1;
@@ -78,7 +70,7 @@ const smooth = (param, value, time) => {
   param.setTargetAtTime(value, time, 0.015);
 };
 const releaseTail = 0.025;
-export const exportDuration = 5;
+export const exportDuration = 3;
 export const cutoffLfoEnabled = false;
 export const glideDuration = 0.3;
 
@@ -158,6 +150,7 @@ export function createVoice(
   const mix = gain(1),
     input = gain(1),
     shaper = node("createWaveShaper");
+  shaper.curve = parabolicCurve;
   shaper.oversample = "4x";
   const envelope = gain(0);
   const filter = node("createBiquadFilter");
@@ -244,11 +237,14 @@ export function createVoice(
   }
 
   function apply(next, immediate = false) {
+    const voices = Math.max(parameters.unisonVoices.min,
+      Math.min(parameters.unisonVoices.max, Math.round(next.unisonVoices)));
+    if (next.unisonVoices !== voices) next = { ...next, unisonVoices: voices };
     const time = context.currentTime;
     const set = (param, value) =>
       immediate ? (param.value = value) : smooth(param, value, time);
     if (immediate || next.drive !== current.drive)
-      shaper.curve = driveCurve(next.drive);
+      set(input.gain, driveGain(next.drive));
     if (next.noiseLevel > 0 && !noise) {
       noise = node("createBufferSource");
       noise.buffer = whiteNoiseBuffer(context);
@@ -438,9 +434,9 @@ export class BassEngine {
 }
 
 const renderCache = new Map();
-export function renderSound(settings) {
+export function renderSound(settings, duration = exportDuration) {
   const snapshot = { ...settings },
-    key = signature(snapshot);
+    key = `${duration}:${signature(snapshot)}`;
   if (renderCache.has(key)) {
     const promise = renderCache.get(key);
     renderCache.delete(key);
@@ -456,10 +452,10 @@ export function renderSound(settings) {
       );
     const context = new Offline(
       2,
-      Math.ceil(exportDuration * 44100),
+      Math.ceil(duration * 44100),
       44100,
     );
-    createVoice(context, snapshot, { start: 0, duration: exportDuration - releaseTail });
+    createVoice(context, snapshot, { start: 0, duration: duration - releaseTail });
     return context.startRendering();
   })();
   renderCache.set(key, promise);

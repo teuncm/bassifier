@@ -2,7 +2,6 @@
 import {
   computed,
   markRaw,
-  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -26,20 +25,16 @@ import {
   signature,
   randomSettings,
   noteName,
-  noteFrequency,
   decodeSettings,
   encodeSettings,
 } from "./settings.js";
 import {
   BassEngine,
   renderSound,
-  encodeWav,
   driveSample,
 } from "./audio.js";
+import { encodeWavAsync } from "./wav-encoder.js";
 
-const playbackLayout = window.matchMedia("(max-width: 1023px)");
-const mobilePlayback = ref(playbackLayout.matches);
-function updatePlaybackLayout(event) { mobilePlayback.value = event.matches; }
 const shared = decodeSettings(new URLSearchParams(location.search).get("p"));
 const settings = reactive(shared?.settings || { ...defaults });
 const locks = reactive(
@@ -163,12 +158,6 @@ function toggleTheme() {
 function systemTheme(event) {
   if (!manualTheme) setTheme(event.matches ? "dark" : "light");
 }
-const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
-const frequencyText = computed(() =>
-  numberFormat.format(
-    noteFrequency(settings.note),
-  ),
-);
 const curvePath = computed(() =>
   Array.from({ length: 101 }, (_, i) => {
     const x = i / 50 - 1;
@@ -308,14 +297,14 @@ function download(blob, name) {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
-async function downloadWav() {
+async function downloadWav(duration = 3) {
   if (exporting.value) return;
   exporting.value = true;
   audioError.value = "";
   try {
     download(
-      encodeWav(await renderSound({ ...settings })),
-      "bassifier-tone.wav",
+      await encodeWavAsync(await renderSound({ ...settings }, duration)),
+      duration === 3 ? "bassifier-tone.wav" : `bassifier-tone-${duration}s.wav`,
     );
   } catch (error) {
     audioError.value = `Could not export this sound. ${error.message}`;
@@ -345,13 +334,29 @@ async function share() {
   } catch (error) {
     if (error.name === "AbortError") return;
     shareFallback.value = url.href;
-    await nextTick();
-    shareInput.value?.select();
   }
   clearTimeout(shareTimer);
   shareTimer = setTimeout(() => {
     shareMessage.value = "";
   }, 2200);
+}
+function copyShareLink() {
+  // Keep the fallback usable when clipboard permission is denied, without
+  // making the read-only URL selectable or opening the mobile keyboard.
+  const input = shareInput.value;
+  if (!input) return;
+  try {
+    input.select();
+    if (document.execCommand("copy")) {
+      shareMessage.value = "Copied!";
+      clearTimeout(shareTimer);
+      shareTimer = setTimeout(() => { shareMessage.value = ""; }, 2200);
+    }
+  } finally {
+    input.setSelectionRange(0, 0);
+    input.blur();
+    window.getSelection()?.removeAllRanges();
+  }
 }
 
 function handleMidi(event) {
@@ -433,6 +438,10 @@ const computerKeys = [
   "Quote",
 ];
 function keydown(event) {
+  if ((event.ctrlKey || event.metaKey) && ["+", "=", "-", "0"].includes(event.key)) {
+    event.preventDefault();
+    return;
+  }
   if (
     event.defaultPrevented ||
     event.isComposing ||
@@ -487,9 +496,13 @@ function background() {
 function visibility() {
   if (document.hidden) background();
 }
+function preventNativeAction(event) { event.preventDefault(); }
+function preventZoomWheel(event) {
+  if (event.ctrlKey || event.metaKey) event.preventDefault();
+}
+const nativeActions = ["selectstart", "contextmenu", "dragstart", "gesturestart", "gesturechange", "dblclick"];
 
 onMounted(() => {
-  playbackLayout.addEventListener("change", updatePlaybackLayout);
   setTheme(theme.value);
   window.addEventListener("keydown", keydown);
   window.addEventListener("keyup", keyup);
@@ -497,11 +510,12 @@ onMounted(() => {
   window.addEventListener("pagehide", background);
   document.addEventListener("visibilitychange", visibility);
   document.addEventListener("freeze", background);
+  for (const name of nativeActions) document.addEventListener(name, preventNativeAction, { passive: false });
+  document.addEventListener("wheel", preventZoomWheel, { passive: false });
   media.addEventListener("change", systemTheme);
 });
 onBeforeUnmount(() => {
   background();
-  playbackLayout.removeEventListener("change", updatePlaybackLayout);
   clearTimeout(shareTimer);
   window.removeEventListener("keydown", keydown);
   window.removeEventListener("keyup", keyup);
@@ -509,6 +523,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("pagehide", background);
   document.removeEventListener("visibilitychange", visibility);
   document.removeEventListener("freeze", background);
+  for (const name of nativeActions) document.removeEventListener(name, preventNativeAction);
+  document.removeEventListener("wheel", preventZoomWheel);
   media.removeEventListener("change", systemTheme);
   midiInputs.forEach((input) => {
     input.onmidimessage = null;
@@ -571,7 +587,10 @@ onBeforeUnmount(() => {
             :context="audioContext"
             :playing="playing"
           />
-          <div id="playback-fft"></div>
+          <section class="card fft-card" aria-label="Spectrum">
+            <div class="section-heading"><h2>Spectrum</h2></div>
+            <FftDisplay :analyser="audioAnalyser" :context="audioContext" :playing="playing" />
+          </section>
           <div class="player-controls">
             <div class="player-buttons">
               <button
@@ -586,11 +605,21 @@ onBeforeUnmount(() => {
                 class="icon-button download-button"
                 :disabled="exporting"
                 :aria-busy="exporting"
-                aria-label="Download WAV (5s)"
-                title="Download WAV (5s)"
-                @click="downloadWav"
+                aria-label="Download WAV (3s)"
+                title="Download WAV (3s)"
+                @click="downloadWav(3)"
               >
-                <AppIcon name="download" :size="18" /><span>(5s)</span>
+                <AppIcon name="download" :size="18" /><span>(3s)</span>
+              </button>
+              <button
+                class="icon-button download-button"
+                :disabled="exporting"
+                :aria-busy="exporting"
+                aria-label="Download WAV (30s)"
+                title="Download WAV (30s)"
+                @click="downloadWav(30)"
+              >
+                <AppIcon name="download" :size="18" /><span>(30s)</span>
               </button>
             </div>
             <div class="play-status" role="status">
@@ -601,13 +630,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </section>
-
-        <Teleport defer to="#playback-fft" :disabled="mobilePlayback">
-          <section class="card fft-card" aria-label="Spectrum">
-            <div class="section-heading"><h2>Spectrum</h2></div>
-            <FftDisplay :analyser="audioAnalyser" :context="audioContext" :playing="playing" />
-          </section>
-        </Teleport>
 
         <div v-if="audioError" class="error-message" role="alert">
           {{ audioError
@@ -639,7 +661,6 @@ onBeforeUnmount(() => {
           <div class="piano-info">
             <div class="selected-tone">
               <strong>{{ noteName(settings.note) }}</strong
-              ><span>{{ frequencyText }} Hz</span
               ><button
                 class="lock-button"
                 :class="{ selected: locks.note }"
@@ -819,14 +840,16 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div v-if="shareFallback" class="share-fallback">
-            <label for="share-url">Copy this link</label
+            <label for="share-url">Share link</label
             ><input
               id="share-url"
               ref="shareInput"
               :value="shareFallback"
               readonly
-              @focus="$event.target.select()"
+              tabindex="-1"
+              @pointerdown.prevent
             />
+            <button class="text-button" @click="copyShareLink">Copy link</button>
           </div>
         </section>
       </aside>

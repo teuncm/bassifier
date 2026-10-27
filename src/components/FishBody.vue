@@ -4,17 +4,13 @@ defineProps({
   eyes: Object, mouth: Object, dorsal: String, tail: Object,
   bodyLength: Number, fins: Object, speckles: Array,
   dragging: Boolean, gaze: Object, playing: Boolean, beatFrequency: Number,
-  returning: Boolean, returnStroke: Object,
 });
 </script>
 
 <template>
   <g class="fish-body-parts">
     <g class="fish-trunk" :transform="`translate(${83 * (1 - bodyLength)} 0) scale(${bodyLength} 1)`">
-    <g class="fish-tail" :style="{
-      transformOrigin: '218px 140px',
-      transform: returning ? `rotate(${returnStroke.tail}deg)` : undefined,
-    }">
+    <g class="fish-tail" style="transform-origin: 218px 140px">
       <path class="fish-tail-shape" :d="tail.path" :fill="body" />
       <path class="fish-tail-rays" :d="tail.ribs" :stroke="light" stroke-width="1.5" fill="none" opacity=".6" />
     </g>
@@ -30,10 +26,7 @@ defineProps({
     <line class="fish-gill" x1="115" y1="136" x2="115" y2="166"
       :stroke="dark" stroke-width="2" stroke-linecap="round" opacity=".5" />
 
-    <g class="fish-fin" :style="{
-      transformOrigin: '130px 145px',
-      transform: returning ? `rotate(${returnStroke.fin}deg)` : undefined,
-    }">
+    <g class="fish-fin" style="transform-origin: 130px 145px">
       <g class="fish-fin-fan">
         <path :d="fins.side" :fill="dark" />
         <path :d="fins.rays"

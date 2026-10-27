@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { parameters, seededRandom } from "../settings.js";
 
 const props = defineProps({ level: { type: Number, default: 0 } });
@@ -8,13 +8,50 @@ const range = parameters.noiseLevel;
 const dragging = ref(false);
 let gesture = null;
 const random = seededRandom(0x5015);
-const particles = Array.from({ length: 200 }, () => ({
-  x: 3 + random() * 94,
-  y: 4 + random() * 92,
-  size: 1.5 + random() * 2,
-  opacity: 0.35 + random() * 0.55,
-}));
+const canvas = ref(null);
+const particles = new Float32Array(400);
+let context, sizeObserver, themeObserver, width = 1, height = 85;
 const amount = computed(() => Math.max(0, Math.min(1, props.level / range.max)));
+function shuffle() {
+  for (let i = 0; i < particles.length; i += 2) {
+    particles[i] = 0.03 + random() * 0.94;
+    particles[i + 1] = 0.04 + random() * 0.92;
+  }
+}
+function paint() {
+  if (!context) return;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(width * ratio), h = Math.round(height * ratio);
+  if (canvas.value.width !== w || canvas.value.height !== h) {
+    canvas.value.width = w; canvas.value.height = h;
+  }
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = getComputedStyle(canvas.value).color;
+  context.beginPath();
+  const count = Math.round(amount.value * 200);
+  for (let i = 0; i < count; i++) {
+    const x = particles[i * 2] * width, y = particles[i * 2 + 1] * height;
+    context.moveTo(x + 1.5, y);
+    context.arc(x, y, 1.5, 0, Math.PI * 2);
+  }
+  context.fill();
+}
+shuffle();
+watch(() => props.level, () => { shuffle(); paint(); }, { flush: "post" });
+watch(dragging, paint, { flush: "post" });
+onMounted(() => {
+  context = canvas.value.getContext("2d");
+  sizeObserver = new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width && entry.contentRect.height) {
+      width = entry.contentRect.width; height = entry.contentRect.height; paint();
+    }
+  });
+  sizeObserver.observe(canvas.value);
+  themeObserver = new MutationObserver(paint);
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+});
+onBeforeUnmount(() => { sizeObserver?.disconnect(); themeObserver?.disconnect(); });
 function update(value) {
   emit("update:level", Math.max(range.min, Math.min(range.max,
     Math.round(value / range.step) * range.step)));
@@ -57,22 +94,11 @@ function keydown(event) {
     :aria-valuemin="range.min" :aria-valuemax="range.max" :aria-valuenow="level" :aria-valuetext="`${level}%`"
     @pointerdown="down" @pointermove="move" @pointerup="release" @pointercancel="release"
     @lostpointercapture="release" @keydown="keydown">
-    <span v-for="(particle, index) in particles" :key="index" class="noise-particle" aria-hidden="true"
-      :style="{
-        left: `${particle.x}%`,
-        top: `${particle.y}%`,
-        width: `${particle.size}px`, height: `${particle.size}px`,
-        opacity: Math.max(0, Math.min(1, amount * particles.length - index)) * particle.opacity,
-      }" />
+    <canvas ref="canvas" class="noise-particles" aria-hidden="true" />
   </div>
 </template>
 
 <style scoped>
 .noise-display { position: relative; width: 100%; height: 85px; overflow: hidden; cursor: ns-resize; }
-.noise-particle {
-  position: absolute; border-radius: 50%; background: var(--visual-signal);
-  transform: translate(-50%, -50%); pointer-events: none;
-  transition: opacity 100ms, background 100ms;
-}
-.dragging .noise-particle { background: var(--interaction); }
+.noise-particles { display: block; width: 100%; height: 100%; color: var(--visual-signal); pointer-events: none; }
 </style>

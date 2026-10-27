@@ -5,16 +5,54 @@ import { defaults, encodeSettings } from "../src/settings.js";
 const shared = (settings = defaults) =>
   `/?p=${encodeURIComponent(encodeSettings(settings))}`;
 
+async function trackGpuTraces(page) {
+  await page.addInitScript(() => {
+    window.gpuTraces = {};
+    function capture(gl) {
+      const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      let hash = 0, lit = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i + 3]) lit++;
+        hash = (Math.imul(hash, 31) + pixels[i] + pixels[i + 1] + pixels[i + 2] + pixels[i + 3]) | 0;
+      }
+      window.gpuTraces[gl.canvas.className] = { hash, lit, error: gl.getError() };
+    }
+    const draw = WebGLRenderingContext.prototype.drawArrays;
+    WebGLRenderingContext.prototype.drawArrays = function (...args) { draw.apply(this, args); capture(this); };
+    const getExtension = WebGLRenderingContext.prototype.getExtension, wrapped = new WeakSet();
+    WebGLRenderingContext.prototype.getExtension = function (name) {
+      const extension = getExtension.call(this, name);
+      if (name === 'ANGLE_instanced_arrays' && extension && !wrapped.has(extension)) {
+        wrapped.add(extension);
+        const gl = this, draw = extension.drawArraysInstancedANGLE.bind(extension);
+        extension.drawArraysInstancedANGLE = (...args) => { draw(...args); capture(gl); };
+      }
+      return extension;
+    };
+  });
+}
+
 test.describe("noise particle visual", () => {
   test.use({ hasTouch: true, viewport: { width: 375, height: 850 } });
   test("particle density tracks the slider and mouse, touch and keys edit noise despite locks", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.noiseDots = [];
+      const clear = CanvasRenderingContext2D.prototype.clearRect, arc = CanvasRenderingContext2D.prototype.arc;
+      CanvasRenderingContext2D.prototype.clearRect = function (...args) {
+        if (this.canvas.classList.contains('noise-particles')) window.noiseDots = [];
+        return clear.apply(this,args);
+      };
+      CanvasRenderingContext2D.prototype.arc = function (...args) {
+        if (this.canvas.classList.contains('noise-particles')) window.noiseDots.push(args.slice(0,3));
+        return arc.apply(this,args);
+      };
+    });
     await page.goto(shared());
     const visual = page.getByRole("slider", { name: "Noise visual control", exact: true });
     const slider = page.getByRole("slider", { name: "Noise level", exact: true });
-    const visibleParticles = () => visual.locator(".noise-particle").evaluateAll((particles) =>
-      particles.filter((particle) => Number(getComputedStyle(particle).opacity) > 0).length);
-    const positions = await visual.locator(".noise-particle").evaluateAll((particles) =>
-      particles.map((particle) => [particle.style.left, particle.style.top, particle.style.width]));
+    const visibleParticles = () => page.evaluate(() => window.noiseDots.length);
+    await expect(slider).toHaveAttribute("step", "1");
     await expect.poll(visibleParticles).toBe(0);
     await visual.scrollIntoViewIfNeeded();
     const box = await visual.boundingBox(), x = box.x + box.width / 2, y = box.y + box.height / 2;
@@ -27,13 +65,16 @@ test.describe("noise particle visual", () => {
     await page.mouse.up();
     await expect(visual).not.toHaveClass(/dragging/);
     await expect.poll(visibleParticles).toBe(100);
+    const positions = await page.evaluate(() => window.noiseDots.slice(0,50));
     await page.getByRole("button", { name: "Lock Noise level", exact: true }).click();
     await visual.focus(); await page.keyboard.press("End");
     await expect(slider).toHaveValue("20");
     await expect(visual).toHaveAttribute("aria-valuenow", "20");
     await expect.poll(visibleParticles).toBe(200);
-    expect(await visual.locator(".noise-particle").evaluateAll((particles) =>
-      particles.map((particle) => [particle.style.left, particle.style.top, particle.style.width]))).toEqual(positions);
+    expect(await page.evaluate(() => window.noiseDots.slice(0,50))).not.toEqual(positions);
+    expect(await page.evaluate(() => window.noiseDots.every(dot => dot[2] === 1.5))).toBe(true);
+    expect(await visual.locator('canvas').evaluate(canvas => canvas.getContext('2d')
+      .getImageData(0,0,canvas.width,canvas.height).data.some((value,index) => index % 4 === 3 && value === 255))).toBe(true);
     const bounds = await visual.boundingBox();
     const touch = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2, id: 1 };
     const session = await page.context().newCDPSession(page);
@@ -42,7 +83,9 @@ test.describe("noise particle visual", () => {
     await session.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
     await expect(slider).toHaveValue("12");
     await expect(visual).not.toHaveClass(/dragging/);
+    const lockedPositions = await page.evaluate(() => window.noiseDots);
     await page.getByRole("button", { name: "Randomize", exact: true }).click();
+    expect(await page.evaluate(() => window.noiseDots)).toEqual(lockedPositions);
     await expect(slider).toHaveValue("12");
     await slider.fill("5");
     await expect(visual).toHaveAttribute("aria-valuenow", "5");
@@ -61,8 +104,8 @@ test.describe("noise particle visual", () => {
         const visual = page.locator(selector);
         await visual.scrollIntoViewIfNeeded();
         const box = await visual.boundingBox(), x = box.x + box.width / 2, y = box.y + box.height / 2;
-        const mark = visual.locator(selector === ".noise-display" ? ".noise-particle" : ".visual-line").first();
-        const property = selector === ".noise-display" ? "background-color" : "stroke";
+        const mark = visual.locator(selector === ".noise-display" ? ".noise-particles" : ".visual-line").first();
+        const property = selector === ".noise-display" ? "color" : "stroke";
         await expect(mark).toHaveCSS(property, "rgb(163, 71, 67)");
         if (mode === "mouse") { await page.mouse.move(x, y); await page.mouse.down(); }
         else await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
@@ -203,7 +246,7 @@ test.describe("drive visual", () => {
     await page.mouse.move(x, y);
     await page.mouse.down();
     await page.mouse.move(x, y + rect.height / 4);
-    await expect(slider).toHaveValue("20");
+    await expect.poll(async () => Math.abs(Number(await slider.inputValue()) - 21.25)).toBeLessThan(0.06);
     await expect(visual.locator(".curve-path")).not.toHaveAttribute(
       "d",
       initialCurve,
@@ -211,11 +254,11 @@ test.describe("drive visual", () => {
     await page.mouse.move(x, y - rect.height);
     await expect(slider).toHaveValue("25");
     await page.mouse.move(x, y + rect.height);
-    await expect(slider).toHaveValue("5");
+    await expect(slider).toHaveValue("10");
     await page.mouse.up();
     await visual.focus();
     await page.keyboard.press("ArrowUp");
-    await expect(slider).toHaveValue("5.1");
+    await expect(slider).toHaveValue("10.1");
     await page.keyboard.press("End");
     await expect(slider).toHaveValue("25");
     const session = await page.context().newCDPSession(page);
@@ -227,7 +270,7 @@ test.describe("drive visual", () => {
       type: "touchMove",
       touchPoints: [{ x, y: y + rect.height / 4, id: 1 }],
     });
-    await expect(slider).toHaveValue("20");
+    await expect.poll(async () => Math.abs(Number(await slider.inputValue()) - 21.25)).toBeLessThan(0.06);
     await session.send("Input.dispatchTouchEvent", {
       type: "touchCancel",
       touchPoints: [],
@@ -257,6 +300,7 @@ test("unison visual edits both axes, clamps values and stays synchronized", asyn
     name: "Unison detune",
     exact: true,
   });
+  const width = page.getByRole("slider", { name: "Unison width", exact: true });
   const lines = pad.locator(".unison-voice");
   await expect(lines).toHaveCount(2);
   const rect = await pad.boundingBox();
@@ -265,26 +309,30 @@ test("unison visual edits both axes, clamps values and stays synchronized", asyn
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.move(x + rect.width / 5, y - rect.height / 3);
-  await expect(voices).toHaveValue("4");
+  await expect(width).toHaveValue("100");
+  await expect(voices).toHaveValue("2");
   await expect(detune).toHaveValue("24");
-  await expect(lines).toHaveCount(4);
+  await expect(lines).toHaveCount(2);
   await page.mouse.move(x + rect.width * 2, y - rect.height * 2);
-  await expect(voices).toHaveValue("7");
+  await expect(width).toHaveValue("100");
   await expect(detune).toHaveValue("75");
   await page.mouse.move(x - rect.width * 2, y + rect.height * 2);
-  await expect(voices).toHaveValue("1");
+  await expect(width).toHaveValue("0");
   await expect(detune).toHaveValue("0");
   await page.mouse.up();
-  await expect(lines).toHaveCount(1);
-  await expect(lines).toHaveAttribute("x1", "200");
+  await expect(lines).toHaveCount(2);
+  await expect(lines.first()).toHaveAttribute("x1", "200");
   await pad.focus();
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowRight");
+  await expect(width).toHaveValue("1");
   await expect(voices).toHaveValue("2");
   await expect(detune).toHaveValue("1");
-  await voices.fill("7");
+  await page.keyboard.press("PageUp");
+  await expect(voices).toHaveValue("3");
+  await voices.fill("5");
   await detune.fill("75");
-  await expect(lines).toHaveCount(7);
+  await expect(lines).toHaveCount(5);
   const ends = await lines.evaluateAll(nodes => nodes.map(node => Number(node.getAttribute("x1"))));
   expect(ends[0]).toBeGreaterThanOrEqual(4);
   expect(ends.at(-1)).toBeLessThanOrEqual(396);
@@ -321,8 +369,8 @@ test("unison visual supports touch drag and cancellation on mobile", async ({
       touchPoints: [{ x: x + rect.width / 5, y: y - rect.height / 3, id: 1 }],
     });
     await expect(
-      page.getByRole("slider", { name: "Unison voices", exact: true }),
-    ).toHaveValue("4");
+      page.getByRole("slider", { name: "Unison width", exact: true }),
+    ).toHaveValue("100");
     await expect(
       page.getByRole("slider", { name: "Unison detune", exact: true }),
     ).toHaveValue("24");
@@ -331,7 +379,25 @@ test("unison visual supports touch drag and cancellation on mobile", async ({
       touchPoints: [],
     });
     await expect(pad).not.toHaveClass(/dragging/);
-    await expect(pad.locator(".unison-voice")).toHaveCount(4);
+    await expect(pad.locator(".unison-voice")).toHaveCount(2);
+    const widthControl = page.getByRole("slider", {name:"Unison width",exact:true});
+    const detuneControl = page.getByRole("slider", {name:"Unison detune",exact:true});
+    const widthBefore = await widthControl.inputValue(), detuneBefore = await detuneControl.inputValue();
+    await session.send("Input.dispatchTouchEvent", {type:"touchStart", touchPoints:[{x:x-20,y,id:1},{x:x+20,y,id:2}]});
+    await session.send("Input.dispatchTouchEvent", {type:"touchMove", touchPoints:[
+      {x:x-20,y:y-rect.height/3,id:1},{x:x+20,y:y-rect.height/3,id:2}]});
+    await expect(page.getByRole("slider", {name:"Unison voices",exact:true})).toHaveValue("3");
+    await expect(widthControl).toHaveValue(widthBefore);
+    await expect(detuneControl).toHaveValue(detuneBefore);
+    // Lifting a finger rebases the one-finger gesture without jumping values.
+    await session.send("Input.dispatchTouchEvent", {type:"touchEnd", touchPoints:[{x:x+20,y:y-rect.height/3,id:2}]});
+    await session.send("Input.dispatchTouchEvent", {type:"touchMove", touchPoints:[{x:x-20,y:y-rect.height/3+rect.height/4,id:1}]});
+    await expect(widthControl).toHaveValue("75");
+    await expect(detuneControl).toHaveValue(detuneBefore);
+    await expect(page.getByRole("slider", {name:"Unison voices",exact:true})).toHaveValue("3");
+    await session.send("Input.dispatchTouchEvent", {type:"touchCancel",touchPoints:[]});
+    await expect(pad).not.toHaveClass(/dragging/);
+
   } finally {
     await context.close();
   }
@@ -359,7 +425,7 @@ test("starts from defaults silently; unison controls, locks and reset work witho
   await expect(
     page.getByRole("button", { name: "Play", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".waveform-trace")).toHaveAttribute("d", "M0,42 L720,42");
+  await expect(page.locator(".waveform-trace")).toHaveAttribute("data-state", "silent");
   await expect(
     page.getByRole("slider", { name: "Drive", exact: true }),
   ).toHaveValue("25");
@@ -371,12 +437,12 @@ test("starts from defaults silently; unison controls, locks and reset work witho
     exact: true,
   });
   await expect(voices).toHaveAttribute("min", "1");
-  await expect(voices).toHaveAttribute("max", "7");
+  await expect(voices).toHaveAttribute("max", "5");
   await expect(voices).toHaveAttribute("step", "1");
   await voices.fill("1");
   await expect(voices).toHaveValue("1");
-  await voices.fill("7");
-  await expect(voices).toHaveValue("7");
+  await voices.fill("5");
+  await expect(voices).toHaveValue("5");
   await page
     .getByRole("button", { name: "Lock Unison detune", exact: true })
     .click();
@@ -389,7 +455,7 @@ test("starts from defaults silently; unison controls, locks and reset work witho
   ).toHaveValue("9");
   await expect(
     page.getByRole("slider", { name: "Drive", exact: true }),
-  ).toHaveValue("15");
+  ).toHaveValue("17.5");
   await page.getByRole("button", { name: "Lock Drive", exact: true }).click();
   await page.evaluate(() => {
     Math.random = () => 0.2;
@@ -397,7 +463,7 @@ test("starts from defaults silently; unison controls, locks and reset work witho
   await page.getByRole("button", { name: "Randomize", exact: true }).click();
   await expect(
     page.getByRole("slider", { name: "Drive", exact: true }),
-  ).toHaveValue("15");
+  ).toHaveValue("17.5");
   await page.getByRole("button", { name: "Reset", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Play", exact: true }),
@@ -418,6 +484,7 @@ test("starts from defaults silently; unison controls, locks and reset work witho
 });
 
 test("live oscilloscope follows audio, refreshes at half pitch and tracks glides", async ({ page }) => {
+  await trackGpuTraces(page);
   await page.addInitScript(() => {
     window.scopeReads = [];
     window.scopeSizes = [];
@@ -434,11 +501,13 @@ test("live oscilloscope follows audio, refreshes at half pitch and tracks glides
   });
   await page.goto(shared({ ...defaults, note: 24, unisonVoices: 2, unisonDetune: 75 }));
   const trace = page.locator(".waveform-trace");
-  await expect(trace).toHaveAttribute("d", "M0,42 L720,42");
+  await expect(trace).toHaveAttribute("data-state", "silent");
   await page.getByRole("button", { name: "Play", exact: true }).click();
-  await expect(trace).not.toHaveAttribute("d", "M0,42 L720,42");
-  const initial = await trace.getAttribute("d");
-  await expect(trace).not.toHaveAttribute("d", initial);
+  await expect(trace).toHaveAttribute("data-state", "live");
+  await expect(trace).toHaveAttribute("data-renderer", "webgl");
+  const initial = await page.evaluate(() => window.gpuTraces["waveform-trace"].hash);
+  await expect.poll(() => page.evaluate(() => window.gpuTraces["waveform-trace"].hash)).not.toBe(initial);
+  expect(await page.evaluate(() => window.gpuTraces["waveform-trace"].lit)).toBeGreaterThan(0);
   await page.waitForTimeout(500);
   const reads = await page.evaluate(() => window.scopeReads);
   expect(reads.length).toBeGreaterThan(4);
@@ -455,7 +524,7 @@ test("live oscilloscope follows audio, refreshes at half pitch and tracks glides
     .toBeCloseTo(2 / 65.406, 4);
   expect(await page.evaluate(() => new Set(window.scopeSizes).size)).toBe(1);
   await page.keyboard.up("k");
-  await expect(trace).toHaveAttribute("d", "M0,42 L720,42");
+  await expect(trace).toHaveAttribute("data-state", "silent");
 });
 
 test("randomize plays one waveform; keyboard takeover sustains until release", async ({ page }) => {
@@ -477,7 +546,7 @@ test("randomize plays one waveform; keyboard takeover sustains until release", a
   await expect(selected).toHaveCSS("animation-name", "none");
   await expect(selected).toHaveCSS("background-color", "rgb(163, 71, 67)");
   await expect(page.locator(".piano-key.chosen-note")).toHaveCount(1);
-  await expect(page.locator(".waveform-trace")).toHaveAttribute("d", "M0,42 L720,42");
+  await expect(page.locator(".waveform-trace")).toHaveAttribute("data-state", "silent");
 
   await randomize.click();
   await expect(stop).toBeVisible();
@@ -528,11 +597,11 @@ test("Z and X change octaves with visible hints, respect bounds and ignore focus
 test("randomize selects the first piano view containing the note, including locked notes", async ({ page }) => {
   await page.goto(shared());
   const randomize = page.getByRole("button", { name: "Randomize", exact: true });
-  await page.evaluate(() => { Math.random = () => 0.95; });
+  await page.evaluate(() => { Math.random = () => 0.9; });
   await randomize.click();
-  await expect(page.locator(".octave-value")).toHaveText("2");
-  await expect(page.locator('.piano-key[data-note="51"]')).toHaveClass(/chosen-note/);
-  const blackKey = page.locator('.piano-key[data-note="51"]');
+  await expect(page.locator(".octave-value")).toHaveText("1");
+  await expect(page.locator('.piano-key[data-note="46"]')).toHaveClass(/chosen-note/);
+  const blackKey = page.locator('.piano-key[data-note="46"]');
   await expect(blackKey).toHaveCSS("background-color", "rgb(163, 71, 67)");
   await page.getByRole("button", { name: "Switch to dark appearance", exact: true }).click();
   await expect(blackKey).toHaveCSS("background-color", "rgb(240, 155, 140)");
@@ -540,7 +609,7 @@ test("randomize selects the first piano view containing the note, including lock
   await page.evaluate(() => { Math.random = () => 0.2; });
   await randomize.click();
   await expect(page.locator(".octave-value")).toHaveText("1");
-  await expect(page.locator('.piano-key[data-note="33"]')).toHaveClass(/chosen-note/);
+  await expect(page.locator('.piano-key[data-note="29"]')).toHaveClass(/chosen-note/);
   for (const [note, octave] of [[12, 0], [48, 1], [49, 2], [60, 2], [61, 3], [72, 3], [84, 4]]) {
     await page.goto(shared({ ...defaults, note }));
     await page.getByRole("button", { name: "Lock Note", exact: true }).click();
@@ -618,7 +687,7 @@ test("audio updates work without cancelAndHoldAtTime", async ({ page }) => {
     page.getByRole("button", { name: "Stop", exact: true }),
   ).toBeVisible();
   for (const [name, value] of [
-    ["Unison voices", "7"],
+    ["Unison voices", "5"],
     ["Unison detune", "25"],
     ["Noise level", "10"],
     ["Low pass", "800"],
@@ -757,37 +826,43 @@ test("touch drag follows the finger and touch cancellation releases the note", a
 test("drive uses parabolic at minimum gain and the live shaper matches its visual", async ({
   page,
 }) => {
-  await page.goto(shared({ ...defaults, drive: 5 }));
+  await page.goto(shared({ ...defaults, drive: 10 }));
+  await expect(page.getByRole("slider", { name: "Drive", exact: true })).toHaveAttribute("min", "10");
   const result = await page.evaluate(async () => {
     const { createVoice } = await import("/src/audio.js");
     const { defaults } = await import("/src/settings.js");
-    const context = new OfflineAudioContext(2, 22050, 44100);
-    const shapers = [];
-    const create = context.createWaveShaper.bind(context);
+    const context = new OfflineAudioContext(2, 22050, 44100), shapers = [];
+    const create = context.createWaveShaper.bind(context), connect = AudioNode.prototype.connect;
+    let input, curveSets = 0;
     context.createWaveShaper = () => {
-      const node = create();
-      shapers.push(node);
-      return node;
+      const node = create(), descriptor = Object.getOwnPropertyDescriptor(WaveShaperNode.prototype,'curve');
+      Object.defineProperty(node,'curve',{ get:() => descriptor.get.call(node), set:value => {curveSets++; descriptor.set.call(node,value);} });
+      shapers.push(node); return node;
     };
-    const settings = { ...defaults, drive: 5 };
-    const voice = createVoice(context, settings, { start: 0, duration: 0.4 });
-    const zero = shapers[0].curve[12288];
-    voice.update({ ...settings, drive: 15 });
-    const half = shapers[0].curve[8320];
-    voice.update({ ...settings, drive: 25 });
-    const full = shapers[0].curve[8320];
-    voice.update(settings);
-    const reset = shapers[0].curve[12288];
-    await context.startRendering();
-    return { zero, half, full, reset };
+    AudioNode.prototype.connect = function (destination, ...args) {
+      if (destination === shapers[0]) input = this;
+      return connect.call(this,destination,...args);
+    };
+    try {
+      const settings = { ...defaults, drive: 10 };
+      const voice = createVoice(context, settings, { start: 0, duration: 0.4 });
+      const initialGain = input.gain.value, curve = shapers[0].curve, initialSets = curveSets;
+      const targets = [], automate = input.gain.setTargetAtTime.bind(input.gain);
+      input.gain.setTargetAtTime = (value,...args) => { targets.push(value); return automate(value,...args); };
+      voice.update({ ...settings, drive: 15 });
+      voice.update({ ...settings, drive: 25 });
+      voice.update(settings);
+      const unchanged = curveSets === initialSets;
+      const sample = curve[9216];
+      await context.startRendering();
+      return { initialGain, targets, unchanged, sample };
+    } finally { AudioNode.prototype.connect = connect; }
   });
-  const u5 = 0.5 * 10 ** (5 / 20);
-  expect(result.zero).toBeCloseTo(2 * u5 - u5 * u5, 6);
-  expect(result.reset).toBeCloseTo(2 * u5 - u5 * u5, 6);
-  const u15 = (1 / 64) * 10 ** (15 / 20);
-  const u25 = (1 / 64) * 10 ** (25 / 20);
-  expect(result.half).toBeCloseTo(2 * u15 - u15 * Math.abs(u15), 6);
-  expect(result.full).toBeCloseTo(2 * u25 - u25 * Math.abs(u25), 6);
+  expect(result.initialGain).toBeCloseTo(10 ** (10 / 20), 5);
+  expect(result.targets).toHaveLength(3);
+  for (const [index,db] of [15,25,10].entries()) expect(result.targets[index]).toBeCloseTo(10 ** (db / 20), 5);
+  expect(result.unchanged).toBe(true);
+  expect(result.sample).toBeCloseTo(2 * 0.125 - 0.125 ** 2, 6);
   const visual = page.getByRole("slider", {
     name: "Drive visual control",
     exact: true,
@@ -795,7 +870,7 @@ test("drive uses parabolic at minimum gain and the live shaper matches its visua
   const zeroCurve = await visual.locator(".curve-path").getAttribute("d");
   zeroCurve.split(" ").forEach((point, i) => {
     const y = Number(point.split(",")[1]);
-    const x = Math.max(-1, Math.min(1, (i / 50 - 1) * 10 ** (5 / 20)));
+    const x = Math.max(-1, Math.min(1, (i / 50 - 1) * 10 ** (10 / 20)));
     expect(y).toBeCloseTo(40 - (2 * x - x * Math.abs(x)) * 36, 8);
   });
   await page.getByRole("slider", { name: "Drive", exact: true }).fill("25");
@@ -810,7 +885,7 @@ test("all unison sources are sawtooth, spread symmetrically and feed one parabol
     const { createVoice } = await import("/src/audio.js");
     const { defaults, noteFrequency } = await import("/src/settings.js");
     const results = [];
-    for (const unisonVoices of [1, 2, 3, 4, 5, 6, 7]) {
+    for (const unisonVoices of [1, 2, 3, 4, 5]) {
       const context = new OfflineAudioContext(2, 22050, 44100),
         sources = [],
         shapers = [];
@@ -856,9 +931,9 @@ test("all unison sources are sawtooth, spread symmetrically and feed one parabol
   });
   for (const result of results) {
     expect(result.types).toEqual(Array(result.count).fill("sawtooth"));
-    expect(result.curve[0]).toBeCloseTo(-1, 5);
+    expect(result.curve[0]).toBeCloseTo(-0.75, 5);
     expect(result.curve[1]).toBe(0);
-    expect(result.curve[2]).toBeCloseTo(1, 5);
+    expect(result.curve[2]).toBeCloseTo(0.75, 5);
     expect(result.oversample).toBe("4x");
     result.frequencies.forEach((f) =>
       expect(f).toBeCloseTo(result.frequency, 4),
@@ -872,7 +947,7 @@ test("all unison sources are sawtooth, spread symmetrically and feed one parabol
   }
 });
 
-test("one through seven unison voices render bounded audible stereo at extreme settings", async ({
+test("one through five unison voices render bounded audible stereo at extreme settings", async ({
   page,
 }) => {
   await page.goto(shared());
@@ -880,7 +955,7 @@ test("one through seven unison voices render bounded audible stereo at extreme s
     const { renderSound } = await import("/src/audio.js"),
       { defaults } = await import("/src/settings.js");
     const results = [];
-    for (let unisonVoices = 1; unisonVoices <= 7; unisonVoices++)
+    for (let unisonVoices = 1; unisonVoices <= 5; unisonVoices++)
       for (const note of [12, 84]) {
         const buffer = await renderSound({
           ...defaults,
@@ -935,7 +1010,7 @@ test("white noise has a live level control and is included in offline output", a
   const result = await page.evaluate(async () => {
     const { createVoice, renderSound } = await import("/src/audio.js");
     const { defaults } = await import("/src/settings.js");
-    const settings = { ...defaults, cutoff: 10000, unisonDetune: 0, drive: 5 };
+    const settings = { ...defaults, cutoff: 10000, unisonDetune: 0, drive: 10 };
     const context = new OfflineAudioContext(2, 44100, 44100);
     const sources = [];
     const makeSource = context.createBufferSource.bind(context);
@@ -1151,7 +1226,7 @@ test("unison count updates live without restarting; one voice ignores detune", a
       p3 = context.suspend(0.55);
     const rendering = context.startRendering();
     await p1;
-    voice.update({ ...patch, unisonVoices: 7 });
+    voice.update({ ...patch, unisonVoices: 5 });
     await context.resume();
     await p2;
     const expanded = {
@@ -1164,7 +1239,7 @@ test("unison count updates live without restarting; one voice ignores detune", a
     await context.resume();
     await p3;
     const collapsed = levels.map((level) => level.gain.value);
-    voice.update({ ...patch, unisonVoices: 7 });
+    voice.update({ ...patch, unisonVoices: 5 });
     await context.resume();
     await rendering;
     const one = await renderSound({
@@ -1173,9 +1248,9 @@ test("unison count updates live without restarting; one voice ignores detune", a
         unisonDetune: 0,
       }),
       oneDetuned = await renderSound(patch),
-      seven = await renderSound({
+      five = await renderSound({
         ...defaults,
-        unisonVoices: 7,
+        unisonVoices: 5,
         unisonWidth: 0,
         unisonDetune: 0,
       });
@@ -1188,7 +1263,7 @@ test("unison count updates live without restarting; one voice ignores detune", a
       );
       normalizedDifference = Math.max(
         normalizedDifference,
-        Math.abs(one.getChannelData(0)[i] - seven.getChannelData(0)[i]),
+        Math.abs(one.getChannelData(0)[i] - five.getChannelData(0)[i]),
       );
     }
     return {
@@ -1199,14 +1274,14 @@ test("unison count updates live without restarting; one voice ignores detune", a
       normalizedDifference,
     };
   });
-  expect(result.created).toBe(7);
+  expect(result.created).toBe(5);
   result.expanded.detunes.forEach((value, index) =>
     expect(
-      Math.abs(value - [-75, -50, -25, 0, 25, 50, 75][index]),
+      Math.abs(value - [-75, -37.5, 0, 37.5, 75][index]),
     ).toBeLessThan(0.02),
   );
   result.expanded.levels.forEach((value) =>
-    expect(value).toBeCloseTo(1 / 7, 3),
+    expect(value).toBeCloseTo(1 / 5, 3),
   );
   expect(result.collapsed[0]).toBeGreaterThan(0.999);
   result.collapsed
@@ -1217,7 +1292,7 @@ test("unison count updates live without restarting; one voice ignores detune", a
   await page.getByRole("button", { name: "Play", exact: true }).click();
   await page
     .getByRole("slider", { name: "Unison voices", exact: true })
-    .fill("7");
+    .fill("5");
   await page
     .getByRole("slider", { name: "Unison voices", exact: true })
     .fill("1");
@@ -1232,7 +1307,7 @@ test("WAV and static fish downloads contain valid artifacts", async ({
   await page.goto(shared());
   const wavPromise = page.waitForEvent("download");
   await page
-    .getByRole("button", { name: "Download WAV (5s)", exact: true })
+    .getByRole("button", { name: "Download WAV (3s)", exact: true })
     .click();
   const wavDownload = await wavPromise,
     wav = await readFile(await wavDownload.path());
@@ -1242,7 +1317,32 @@ test("WAV and static fish downloads contain valid artifacts", async ({
   expect(wav.readUInt16LE(22)).toBe(2);
   expect(wav.readUInt32LE(24)).toBe(44100);
   expect(wav.readUInt32LE(40)).toBe(wav.length - 44);
-  expect(wav.readUInt32LE(40) / (44100 * 2 * 2)).toBe(5);
+  expect(wav.readUInt32LE(40) / (44100 * 2 * 2)).toBe(3);
+  const longPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download WAV (30s)", exact: true }).click();
+  const longDownload = await longPromise;
+  const longWav = await readFile(await longDownload.path());
+  expect(longDownload.suggestedFilename()).toBe("bassifier-tone-30s.wav");
+  expect(longWav.toString("ascii", 0, 4)).toBe("RIFF");
+  expect(longWav.toString("ascii", 8, 12)).toBe("WAVE");
+  expect(longWav.readUInt16LE(22)).toBe(2);
+  expect(longWav.readUInt32LE(24)).toBe(44100);
+  expect(longWav.readUInt32LE(40)).toBe(longWav.length - 44);
+  expect(longWav.readUInt32LE(40) / (44100 * 2 * 2)).toBe(30);
+  // The same sound must retain separate cached renders for each duration.
+  const buffers = await page.evaluate(async () => {
+    const { renderSound } = await import('/src/audio.js');
+    const { defaults } = await import('/src/settings.js');
+    const short = await renderSound(defaults), long = await renderSound(defaults, 30);
+    const tail = long.getChannelData(0).subarray(29 * 44100, 29.5 * 44100);
+    return { short: short.duration, long: long.duration,
+      cached: await renderSound(defaults, 30) === long,
+      latePeak: Math.max(...tail.map(Math.abs)) };
+  });
+  expect(buffers.short).toBe(3);
+  expect(buffers.long).toBe(30);
+  expect(buffers.cached).toBe(true);
+  expect(buffers.latePeak).toBeGreaterThan(0.01);
   const svgPromise = page.waitForEvent("download");
   await page
     .getByRole("button", { name: "Download bass (SVG)", exact: true })
@@ -1363,7 +1463,7 @@ test("pitch glides linearly for 300 ms, retargets continuously, and release cuts
       oscillators.push(osc);
       return osc;
     };
-    const settings = { ...defaults, unisonVoices: 7 };
+    const settings = { ...defaults, unisonVoices: 5 };
     const voice = createVoice(context, settings, { start: 0 });
     const times = [0.1, 0.15, 0.2, 0.25, 0.51, 0.55];
     const pauses = times.map((time) => context.suspend(time));
@@ -1495,6 +1595,7 @@ test("sharing restores sound without autoplay; malformed URLs fall back safely",
     page.getByRole("button", { name: "Copied!", exact: true }),
   ).toBeVisible();
   const url = await page.evaluate(() => window.copiedUrl);
+  expect(new URL(url).searchParams.get("p")).toMatch(/^1,/);
   await page.goto(url);
   await expect(page.locator(".selected-tone strong")).toHaveText("E2");
   await expect(page.getByRole("slider", { name: "Noise width", exact: true })).toHaveCount(0);
@@ -1663,6 +1764,7 @@ test.describe("fish interaction", () => {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.clock.install();
+    await page.clock.pauseAt(new Date(Date.now() + 1000));
     await page.goto(shared());
     const fish = page.locator(".fish-draggable");
     const randomize = page.getByRole("button", {
@@ -1673,15 +1775,16 @@ test.describe("fish interaction", () => {
     // Lock deterministic new dimensions so the visual swap is observable.
     await page
       .getByRole("slider", { name: "Unison voices", exact: true })
-      .fill("7");
+      .fill("5");
     await page
       .getByRole("button", { name: "Lock Unison voices", exact: true })
       .click();
-    const before = await page.locator(".fish-hair").getAttribute("d");
+    // Tail geometry is independent of the audio sample rate initialized on first play.
+    const before = await page.locator(".fish-tail-shape").getAttribute("d");
     await randomize.click();
     await expect(fish).toHaveClass(/popping-out/);
     await expect(page.locator(".fish-particle")).toHaveCount(20);
-    await expect(page.locator(".fish-hair")).toHaveAttribute("d", before);
+    await expect(page.locator(".fish-tail-shape")).toHaveAttribute("d", before);
     await page.clock.runFor(130);
     await expect(fish).toHaveClass(/popping-in/);
     await expect(page.locator(".fish-tail-shape")).not.toHaveAttribute(
@@ -1775,7 +1878,7 @@ test.describe("fish interaction", () => {
 });
 
 test("notes cycle the fish through the rainbow and drive changes hair and decorative speckles", async ({ page }) => {
-  await page.goto(shared({ ...defaults, drive: 5 }));
+  await page.goto(shared({ ...defaults, drive: 10 }));
   const color = page.locator(".fish-body");
   for (let semitone = 0; semitone <= 12; semitone++) {
     await page.locator(`.piano-key[data-note="${24 + semitone}"]`).click();
@@ -1801,7 +1904,7 @@ test("fish vibration grows with noise, stops on release, and respects reduced mo
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.goto(shared({ ...defaults, drive: 5, noiseLevel: 0 }));
+  await page.goto(shared({ ...defaults, drive: 10, noiseLevel: 0 }));
   const layer = page.locator(".fish-vibration");
   await expect(layer).toHaveCSS("animation-name", "none");
   await page.keyboard.down("a");
@@ -1854,7 +1957,7 @@ test("fish eyes and dramatic hair and tail morphs follow their parameters", asyn
   await page.goto(
     shared({
       ...defaults,
-      drive: 5,
+      drive: 10,
       cutoff: 10000,
       unisonVoices: 1,
       unisonDetune: 0,
@@ -1931,7 +2034,7 @@ test("fish eyes and dramatic hair and tail morphs follow their parameters", asyn
   const smallMouth = await bounds(".fish-muzzle");
   await page
     .getByRole("slider", { name: "Unison voices", exact: true })
-    .fill("7");
+    .fill("5");
   const bigTail = await bounds(".fish-tail-shape");
   const bigMouth = await bounds(".fish-muzzle");
   expect(bigMouth.width).toBeGreaterThan(smallMouth.width * 2.2);
@@ -1962,7 +2065,7 @@ test("fish eyes and dramatic hair and tail morphs follow their parameters", asyn
   const smallOpenMouth = await bounds(".fish-mouth");
   await page
     .getByRole("slider", { name: "Unison voices", exact: true })
-    .fill("7");
+    .fill("5");
   const bigOpenMouth = await bounds(".fish-mouth");
   expect(bigOpenMouth.width).toBeGreaterThan(smallOpenMouth.width * 1.5);
   expect(bigOpenMouth.height).toBeGreaterThan(smallOpenMouth.height * 1.5);
@@ -1986,6 +2089,13 @@ for (const width of [320, 375, 560, 768, 1024, 1280]) {
       helpInCard: Boolean(document.querySelector(".locks-help").closest(".card")),
     }));
     expect(info.documentWidth).toBeLessThanOrEqual(width);
+    const longButton = page.getByRole('button', {name:'Download WAV (30s)', exact:true});
+    await expect(longButton).toBeVisible();
+    const longBounds = await longButton.boundingBox();
+    expect(longBounds.x + longBounds.width).toBeLessThanOrEqual(width);
+    const statusBounds = await page.locator('.play-status').boundingBox();
+    expect(statusBounds.x).toBeGreaterThanOrEqual(longBounds.x + longBounds.width);
+
     expect(info.actionsBottom).toBeLessThanOrEqual(info.workspaceTop);
     expect(info.helpInCard).toBe(false);
     await page.getByRole("slider", { name: "Drive", exact: true }).fill("24");
@@ -2049,36 +2159,60 @@ test("mobile sharing opens native share and octave shortcuts highlight their but
 });
 
 
-test("unison wheel edits width without scrolling and tilts lines toward pan", async ({ page }) => {
+test("unison wheel edits voices without scrolling and lines reflect stereo width", async ({ page }) => {
   await page.goto(shared({ ...defaults, unisonVoices: 3, unisonWidth: 50 }));
   const pad = page.getByRole("group", { name: "Unison visual control" });
   const width = page.getByRole("slider", { name: "Unison width", exact: true });
+  const voices = page.getByRole("slider", { name: "Unison voices", exact: true });
   await pad.scrollIntoViewIfNeeded();
   await pad.hover();
   const scroll = await page.evaluate(() => window.scrollY);
   await page.mouse.wheel(0, -100);
-  await expect(width).toHaveValue("60");
+  await expect(voices).toHaveValue("4");
+  await expect(width).toHaveValue("50");
   const tilts = () => pad.locator(".unison-voice").evaluateAll(nodes => nodes.map(node =>
     Number(node.getAttribute("x1")) - Number(node.getAttribute("x2"))));
   const initial = await tilts();
   expect(initial[0]).toBeLessThan(0);
-  expect(initial[1]).toBe(0);
-  expect(initial[2]).toBeGreaterThan(0);
+  expect(initial.at(-1)).toBeGreaterThan(0);
   await page.mouse.wheel(0, -10000);
-  await expect(width).toHaveValue("100");
-  expect((await tilts())[2]).toBeGreaterThan(initial[2]);
+  await expect(voices).toHaveValue("5");
   await page.mouse.wheel(0, -100);
-  await expect(width).toHaveValue("100");
+  await expect(voices).toHaveValue("5");
   await page.mouse.wheel(0, 10000);
-  await expect(width).toHaveValue("0");
-  expect(await tilts()).toEqual([0, 0, 0]);
+  await expect(voices).toHaveValue("1");
+  expect(await tilts()).toEqual([0]);
   await page.mouse.wheel(0, 100);
-  await expect(width).toHaveValue("0");
+  await expect(voices).toHaveValue("1");
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.scrollY)).toBe(scroll);
+  await voices.fill("3");
   await width.fill("100");
-  await page.getByRole("slider", { name: "Unison voices", exact: true }).fill("1");
-  expect(await tilts()).toEqual([0]);
+  expect((await tilts())[0]).toBeLessThan(initial[0]);
+  const angles = await pad.locator('.unison-voice').evaluateAll(lines => lines.map(line => {
+    const dx = Number(line.getAttribute('x1')) - Number(line.getAttribute('x2'));
+    const dy = Number(line.getAttribute('y2')) - Number(line.getAttribute('y1'));
+    const bounds = line.ownerSVGElement.getBoundingClientRect();
+    return Math.atan2(dx * bounds.width / 400, dy * bounds.height / 80) * 180 / Math.PI;
+  }));
+  expect(angles[0]).toBeCloseTo(-45, 5);
+  expect(angles[1]).toBeCloseTo(0, 5);
+  expect(angles[2]).toBeCloseTo(45, 5);
+  for (const viewport of [{width:375,height:850},{width:1280,height:1000}]) {
+    await page.setViewportSize(viewport);
+    await pad.scrollIntoViewIfNeeded();
+    for (const panWidth of [0, 25, 50, 100]) {
+      await width.fill(String(panWidth));
+      await expect.poll(() => pad.locator('.unison-voice').evaluateAll(lines => lines.map(line => {
+        const bounds = line.ownerSVGElement.getBoundingClientRect();
+        const dx = (Number(line.getAttribute('x1')) - Number(line.getAttribute('x2'))) * bounds.width / 400;
+        const dy = (Number(line.getAttribute('y2')) - Number(line.getAttribute('y1'))) * bounds.height / 80;
+        return Math.round(Math.atan2(dx,dy) * 180 / Math.PI * 100) / 100;
+      }))).toEqual([-45 * panWidth / 100 || 0, 0, 45 * panWidth / 100]);
+    }
+  }
+
+
 });
 
 
@@ -2103,9 +2237,10 @@ test("lock help stays below and aligned with main cards on large displays", asyn
 });
 
 
-test("Spectrum displays live output, shares desktop playback and has its own mobile card", async ({ page }) => {
+test("Spectrum renders on the GPU below the waveform on desktop and mobile", async ({ page }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await trackGpuTraces(page);
   await page.goto(shared());
   const fft = page.getByRole('region', {name:'Spectrum',exact:true});
   await expect(fft).toHaveCount(1);
@@ -2113,19 +2248,26 @@ test("Spectrum displays live output, shares desktop playback and has its own mob
   const waveform = await page.locator('.waveform').boundingBox();
   expect((await fft.boundingBox()).y).toBeGreaterThanOrEqual(waveform.y + waveform.height);
   const spectrum = fft.locator('.fft-trace');
-  await expect(spectrum).toHaveAttribute('d', 'M0,90H720');
-  await expect(fft.locator('svg path')).toHaveCount(1);
+  await expect(spectrum).toHaveAttribute('data-state', 'silent');
+  await expect(spectrum).toHaveAttribute('data-renderer', 'webgl');
+  expect(await page.evaluate(() => window.gpuTraces['fft-trace'].lit)).toBeGreaterThan(0);
   await page.getByRole('button', {name:'Play',exact:true}).click();
-  await expect(spectrum).not.toHaveAttribute('d', 'M0,90H720');
-  const first = await spectrum.getAttribute('d');
+  await expect(spectrum).toHaveAttribute('data-state', 'live');
+  const first = await page.evaluate(() => window.gpuTraces['fft-trace'].hash);
   await page.getByRole('slider', {name:'Low pass',exact:true}).fill('1000');
-  await expect.poll(() => spectrum.getAttribute('d')).not.toBe(first);
+  await expect.poll(() => page.evaluate(() => window.gpuTraces['fft-trace'].hash)).not.toBe(first);
   await page.setViewportSize({width:375,height:850});
-  await expect(page.locator('.main-column > .fft-card')).toHaveCount(1);
-  await expect(page.locator('.playback-card .fft-card')).toHaveCount(0);
-  await expect(spectrum).not.toHaveAttribute('d', 'M0,90H720');
+  await expect(page.locator('.main-column > .fft-card')).toHaveCount(0);
+  await expect(page.locator('.playback-card .fft-card')).toHaveCount(1);
+  const mobileWave = await page.locator('.waveform').boundingBox();
+  const mobileSpectrum = await page.locator('.fft-display').boundingBox();
+  expect(mobileSpectrum.y).toBeGreaterThanOrEqual(mobileWave.y + mobileWave.height);
+  const controls = await page.locator('.player-controls').boundingBox();
+  expect(controls.y).toBeGreaterThanOrEqual(mobileSpectrum.y + mobileSpectrum.height);
+  expect(controls.y + controls.height).toBeLessThanOrEqual(850);
+  await expect(spectrum).toHaveAttribute('data-state', 'live');
   await page.getByRole('button', {name:'Stop',exact:true}).click();
-  await expect(spectrum).toHaveAttribute('d', 'M0,90H720');
+  await expect(spectrum).toHaveAttribute('data-state', 'silent');
   await page.setViewportSize({width:2560,height:1440});
   await expect(page.locator('.playback-card .fft-card')).toHaveCount(1);
   expect(errors).toEqual([]);
@@ -2137,8 +2279,8 @@ test("fish speckles change with every sound parameter and restore deterministica
   const pattern = () => page.locator('.fish-speckles').innerHTML();
   const original = await pattern();
   expect(await page.locator('.fish-speckles circle').count()).toBeGreaterThanOrEqual(14);
-  for (const [name, value] of [['Unison voices','7'], ['Unison detune','30'], ['Unison width','0'],
-    ['Noise level','10'], ['Low pass','1000'], ['Resonance','50'], ['Drive','5']]) {
+  for (const [name, value] of [['Unison voices','5'], ['Unison detune','30'], ['Unison width','0'],
+    ['Noise level','10'], ['Low pass','1000'], ['Resonance','50'], ['Drive','10']]) {
     const slider = page.getByRole('slider', {name, exact:true});
     const previous = await slider.inputValue();
     await slider.fill(value);
@@ -2211,7 +2353,7 @@ test("fish stays centered across compact and long bodies and extreme morphs", as
     await page.setViewportSize({width,height:1000});
     await page.goto(shared());
     for (const [unisonWidth,voices,detune,noise,drive,cutoff] of [
-      [0,1,0,0,5,0], [0,7,75,20,25,1000], [100,1,0,0,5,0], [100,7,75,20,25,1000], [50,4,35,10,15,650],
+      [0,1,0,0,10,0], [0,5,75,20,25,1000], [100,1,0,0,10,0], [100,5,75,20,25,1000], [50,4,35,10,15,650],
     ]) {
       for (const [name,value] of [['Unison width',unisonWidth],['Unison voices',voices],['Unison detune',detune],['Noise level',noise],['Drive',drive],['Low pass',cutoff]])
         await page.getByRole('slider',{name,exact:true}).fill(String(value));
@@ -2226,3 +2368,347 @@ test("fish stays centered across compact and long bodies and extreme morphs", as
 
 
 
+
+
+test("GPU traces restore after context loss and follow theme changes", async ({page}) => {
+  await trackGpuTraces(page);
+  await page.goto(shared());
+  const trace = page.locator('.waveform-trace');
+  const original = await page.evaluate(() => window.gpuTraces['waveform-trace'].hash);
+  await page.getByRole('button', {name: /Switch to .* appearance/}).click();
+  await expect.poll(() => page.evaluate(() => window.gpuTraces['waveform-trace'].hash)).not.toBe(original);
+  await trace.evaluate(canvas => {
+    window.traceRestored = false;
+    canvas.addEventListener('webglcontextrestored', () => { window.traceRestored = true; }, {once: true});
+    window.loseTrace = canvas.getContext('webgl').getExtension('WEBGL_lose_context');
+    window.loseTrace.loseContext();
+  });
+  await expect.poll(() => trace.evaluate(canvas => canvas.getContext('webgl').isContextLost())).toBe(true);
+  await page.evaluate(() => window.loseTrace.restoreContext());
+  await expect.poll(() => page.evaluate(() => window.traceRestored)).toBe(true);
+  expect(await page.evaluate(() => window.gpuTraces['waveform-trace'].lit)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.gpuTraces['waveform-trace'].error)).toBe(0);
+  await page.getByRole('button', {name:'Play',exact:true}).click();
+  await expect(trace).toHaveAttribute('data-state', 'live');
+});
+
+test("traces fall back to canvas when WebGL is unavailable", async ({page}) => {
+  await page.addInitScript(() => {
+    const context = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      return type === 'webgl' ? null : context.call(this, type, ...args);
+    };
+  });
+  await page.goto(shared());
+  for (const name of ['.waveform-trace', '.fft-trace']) {
+    await expect(page.locator(name)).toHaveAttribute('data-renderer', 'canvas2d');
+    expect(await page.locator(name).evaluate(canvas =>
+      canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.some(value => value > 0))).toBe(true);
+  }
+  await page.getByRole('button', {name:'Play',exact:true}).click();
+  await expect(page.locator('.waveform-trace')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('.fft-trace')).toHaveAttribute('data-state', 'live');
+});
+
+
+for (const width of [375, 1280]) {
+  test(`offscreen fish preview follows edits and clears on return or inactivity at ${width}px`, async ({page}) => {
+    await page.setViewportSize({width, height: 650});
+    await page.clock.install();
+    await page.goto(shared());
+    const bubble = page.locator('.fish-ghost-bubble');
+    const drive = page.getByRole('slider', {name:'Drive', exact:true});
+    await expect(bubble).toHaveCount(0);
+    await drive.scrollIntoViewIfNeeded();
+    await drive.fill('10');
+    await expect(bubble).toBeVisible();
+    await expect(bubble).toHaveCSS('pointer-events', 'none');
+    const reference = await bubble.locator('use').getAttribute('href');
+    expect(reference).toMatch(/^#fish-preview-/);
+    const source = page.locator(`[id="${reference.slice(1)}"]`);
+    const initialHair = await source.locator('.fish-hair').getAttribute('d');
+    await page.clock.runFor(1500);
+    await drive.fill('20');
+    await expect(source.locator('.fish-hair')).not.toHaveAttribute('d', initialHair);
+    await page.clock.runFor(1500);
+    await expect(bubble).toBeVisible();
+    const bounds = await bubble.boundingBox();
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+    if (width < 1024) {
+      const player = await page.locator('.playback-card').boundingBox();
+      expect(bounds.y + bounds.height).toBeLessThan(player.y);
+    }
+    await page.clock.runFor(600);
+    await expect(bubble).toHaveCount(0);
+    await drive.fill('15');
+    await expect(bubble).toBeVisible();
+    await page.locator('.fish-card').scrollIntoViewIfNeeded();
+    await expect(bubble).toHaveCount(0);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    // Editing an in-view fish must not produce a duplicate preview.
+    await page.evaluate(() => {
+      const input = document.querySelector('#range-drive');
+      input.value = '12';
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+    });
+    await expect(bubble).toHaveCount(0);
+  });
+}
+
+
+test.describe('mobile app interactions', () => {
+  test.use({viewport:{width:375,height:850}, isMobile:true, hasTouch:true});
+  test('prevents selection and zoom while retaining scrolling and playback', async ({page}) => {
+    await page.goto(shared());
+    const behavior = await page.evaluate(() => {
+      const title = document.querySelector('h1');
+      const root = getComputedStyle(document.documentElement);
+      const canceled = ['selectstart', 'contextmenu', 'dragstart', 'gesturestart', 'gesturechange', 'dblclick'].map(type =>
+        !title.dispatchEvent(new Event(type, {bubbles:true,cancelable:true})));
+      const zoomWheel = new WheelEvent('wheel', {bubbles:true,cancelable:true,ctrlKey:true,deltaY:-100});
+      const normalWheel = new WheelEvent('wheel', {bubbles:true,cancelable:true,deltaY:100});
+      title.dispatchEvent(zoomWheel); title.dispatchEvent(normalWheel);
+      const shortcuts = ['+', '-', '0'].map(key => {
+        const event = new KeyboardEvent('keydown', {key,ctrlKey:true,bubbles:true,cancelable:true});
+        title.dispatchEvent(event); return event.defaultPrevented;
+      });
+      return {canceled,shortcuts,zoomWheel:zoomWheel.defaultPrevented,normalWheel:normalWheel.defaultPrevented,
+        selection:getComputedStyle(title).userSelect,pan:root.touchAction,overscroll:root.overscrollBehavior};
+    });
+    expect(behavior).toEqual({canceled:[true,true,true,true,true,true],shortcuts:[true,true,true],
+      zoomWheel:true,normalWheel:false,selection:'none',pan:'pan-y',overscroll:'none'});
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.synthesizePinchGesture', {x:180,y:110,scaleFactor:1.7,relativeSpeed:800,gestureSourceType:'touch'});
+    expect(await page.evaluate(() => visualViewport.scale)).toBe(1);
+    await page.getByRole('heading', {name:'Your bass',exact:true}).dblclick();
+    expect(await page.evaluate(() => window.getSelection().toString())).toBe('');
+    await page.mouse.move(5, 250);
+    await page.mouse.wheel(0, 400);
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(0);
+    await page.getByRole('button', {name:'Play',exact:true}).tap();
+    await expect(page.getByRole('button', {name:'Stop',exact:true})).toBeVisible();
+    await page.getByRole('button', {name:'Stop',exact:true}).tap();
+  });
+
+  test('share fallback copies without leaving selectable text or focusing the URL', async ({page}) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'share', {value:undefined});
+      Object.defineProperty(navigator, 'clipboard', {value:{writeText:async () => {throw new Error('Denied');}}});
+      document.execCommand = command => {
+        const input = document.querySelector('#share-url');
+        window.fallbackCopy = {command, text:input.value.slice(input.selectionStart,input.selectionEnd)};
+        return true;
+      };
+    });
+    await page.goto(shared());
+    await page.getByRole('button', {name:'Share your bass',exact:true}).tap();
+    const input = page.locator('#share-url');
+    await expect(input).toBeVisible();
+    await expect(input).toHaveCSS('user-select','none');
+    await expect(input).toHaveCSS('font-size','16px');
+    await input.tap();
+    expect(await input.evaluate(el => document.activeElement === el)).toBe(false);
+    const url = await input.inputValue();
+    await page.getByRole('button', {name:'Copy link',exact:true}).tap();
+    await expect(page.getByRole('button', {name:'Copied!',exact:true})).toBeVisible();
+    expect(await page.evaluate(() => window.fallbackCopy)).toEqual({command:'copy',text:url});
+    expect(await input.evaluate(el => el.selectionStart === el.selectionEnd && document.activeElement !== el)).toBe(true);
+  });
+});
+
+
+test('randomizing a swimming fish pops in place before continuing home', async ({page}) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await page.goto(shared());
+  const fish = page.locator('.fish-draggable');
+  const box = await fish.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 - 250, box.y + box.height / 2 + 160);
+  await page.mouse.up();
+  await expect(fish).toHaveClass(/returning/);
+  await page.clock.runFor(160);
+  const position = await fish.evaluate(el => el.style.transform);
+  const randomize = page.getByRole('button', {name:'Randomize',exact:true});
+  await randomize.click();
+  await expect(fish).toHaveClass(/popping-out/);
+  await page.clock.runFor(130);
+  await expect(fish).toHaveClass(/popping-in/);
+  await expect(fish).toHaveClass(/returning/);
+  expect(await fish.evaluate(el => el.style.transform)).toBe(position);
+  await expect(page.locator('.fish-particle')).toHaveCount(20);
+  // Restarting the pop also preserves the same swimming position.
+  await randomize.click();
+  await page.clock.runFor(500);
+  expect(await fish.evaluate(el => el.style.transform)).toBe(position);
+  await page.clock.runFor(250);
+  expect(await fish.evaluate(el => el.style.transform)).not.toBe(position);
+  await page.clock.runFor(1800);
+  await expect(fish).not.toHaveClass(/returning|popping/);
+  expect(await fish.evaluate(el => el.style.transform)).toBe('translate(0px, 0px)');
+});
+
+
+test.describe('mobile player viewport stability', () => {
+  test.use({viewport:{width:375,height:812},isMobile:true,hasTouch:true});
+  test('stays anchored while scrolling, resizing, rotating and attempting zoom during playback', async ({page}) => {
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(shared());
+    await page.getByRole('button', {name:'Play',exact:true}).tap();
+    const cdp = await page.context().newCDPSession(page);
+    for (const size of [{width:375,height:680},{width:375,height:812},{width:844,height:390},{width:320,height:568}]) {
+      await page.setViewportSize(size);
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await cdp.send('Input.synthesizePinchGesture', {x:160,y:100,scaleFactor:1.6,relativeSpeed:800,gestureSourceType:'touch'});
+      await expect.poll(() => page.evaluate(() => {
+        const bounds = document.querySelector('.playback-card').getBoundingClientRect();
+        return Math.abs(bounds.bottom - (visualViewport.offsetTop + visualViewport.height));
+      })).toBeLessThan(1);
+      const state = await page.evaluate(() => {
+        const player = document.querySelector('.playback-card').getBoundingClientRect();
+        const buttons = [...document.querySelectorAll('.player-buttons button')].map(button => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+          return button.contains(hit);
+        });
+        const canvases = [...document.querySelectorAll('.playback-card canvas')].map(canvas => {
+          const rect = canvas.getBoundingClientRect(), gl = canvas.getContext('webgl');
+          return {width:canvas.width, expected:Math.round(rect.width * Math.min(devicePixelRatio,2)), lost:gl.isContextLost()};
+        });
+        return {scale:visualViewport.scale,left:player.left,right:player.right,width:innerWidth,buttons,canvases};
+      });
+      expect(state.scale).toBe(1);
+      expect(state.left).toBe(0);
+      expect(state.right).toBe(state.width);
+      const graphEdges = await page.locator('.playback-card canvas').evaluateAll(canvases => canvases.map(canvas => {
+        const bounds = canvas.getBoundingClientRect();
+        return {left:bounds.left,right:bounds.right};
+      }));
+      for (const edge of graphEdges) { expect(edge.left).toBe(0); expect(edge.right).toBe(state.width); }
+
+      expect(state.buttons).toEqual([true,true,true]);
+      for (const canvas of state.canvases) { expect(canvas.width).toBe(canvas.expected); expect(canvas.lost).toBe(false); }
+      await expect(page.locator('.waveform-trace')).toHaveAttribute('data-state','live');
+      await expect(page.locator('.fft-trace')).toHaveAttribute('data-state','live');
+      await page.evaluate(() => window.scrollTo(0,0));
+    }
+    await page.getByRole('button', {name:'Stop',exact:true}).tap();
+    expect(errors).toEqual([]);
+  });
+});
+
+
+test('WAV worker preserves samples and cached audio, with a synchronous fallback', async ({page}) => {
+  await page.goto(shared());
+  const result = await page.evaluate(async () => {
+    const { renderSound, encodeWav } = await import('/src/audio.js');
+    const { encodeWavAsync } = await import('/src/wav-encoder.js');
+    const { defaults } = await import('/src/settings.js');
+    const audio = await renderSound(defaults), samples = audio.getChannelData(0);
+    const original = samples.slice(), expected = new Uint8Array(await encodeWav(audio).arrayBuffer());
+    const actual = new Uint8Array(await (await encodeWavAsync(audio)).arrayBuffer());
+    const intact = samples.length === original.length && samples.every((value,index) => value === original[index]);
+    const Worker = window.Worker;
+    try {
+      window.Worker = undefined;
+      const fallback = new Uint8Array(await (await encodeWavAsync(audio)).arrayBuffer());
+      return {intact, workerMatches:actual.every((value,index) => value === expected[index]),
+        sameLength:actual.length === expected.length,
+        fallbackMatches:fallback.length === expected.length && fallback.every((value,index) => value === expected[index])};
+    } finally { window.Worker = Worker; }
+  });
+  expect(result).toEqual({intact:true,workerMatches:true,sameLength:true,fallbackMatches:true});
+});
+
+test('GPU traces fall back to non-instanced WebGL when the extension is unavailable', async ({page}) => {
+  await page.addInitScript(() => {
+    const extension = WebGLRenderingContext.prototype.getExtension;
+    WebGLRenderingContext.prototype.getExtension = function(name) {
+      return name === 'ANGLE_instanced_arrays' ? null : extension.call(this,name);
+    };
+  });
+  await trackGpuTraces(page);
+  await page.goto(shared());
+  await page.getByRole('button',{name:'Play',exact:true}).click();
+  for (const name of ['waveform-trace','fft-trace']) {
+    await expect.poll(() => page.evaluate(name => window.gpuTraces[name]?.lit??0,name)).toBeGreaterThan(0);
+    expect(await page.evaluate(name => window.gpuTraces[name].error,name)).toBe(0);
+  }
+});
+
+
+test('live edits reuse the shaper and upload compact GPU point buffers', async ({page}) => {
+  await page.addInitScript(() => {
+    window.audioCurveWrites = 0; window.traceUploads = [];
+    const curve = Object.getOwnPropertyDescriptor(WaveShaperNode.prototype,'curve');
+    Object.defineProperty(WaveShaperNode.prototype,'curve',{...curve,set(value){window.audioCurveWrites++;curve.set.call(this,value);}});
+    const upload = WebGLRenderingContext.prototype.bufferSubData;
+    WebGLRenderingContext.prototype.bufferSubData = function(...args) {
+      window.traceUploads.push(args[2].byteLength); return upload.apply(this,args);
+    };
+  });
+  await page.goto(shared());
+  await page.getByRole('button',{name:'Play',exact:true}).click();
+  await expect(page.locator('.waveform-trace')).toHaveAttribute('data-state','live');
+  await page.evaluate(() => {window.audioCurveWrites=0;window.traceUploads=[];});
+  const drive = page.getByRole('slider',{name:'Drive',exact:true});
+  await drive.fill('10'); await drive.fill('15'); await drive.fill('20');
+  await page.getByRole('slider',{name:'Noise level',exact:true}).fill('20');
+  await expect.poll(() => page.evaluate(() => window.traceUploads.length)).toBeGreaterThan(4);
+  const result = await page.evaluate(() => ({writes:window.audioCurveWrites,maxUpload:Math.max(...window.traceUploads)}));
+  expect(result.writes).toBe(0);
+  expect(result.maxUpload).toBeLessThan(6000);
+  await expect(page.locator('.noise-display canvas')).toHaveCount(1);
+  await expect(page.locator('.noise-display span')).toHaveCount(0);
+});
+
+
+test.describe('visual work budgets', () => {
+  test.use({viewport:{width:375,height:812},isMobile:true,hasTouch:true});
+  test('caps graph polling/drawing and freezes offscreen decorations', async ({page}) => {
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    await page.addInitScript(() => {
+      window.workCounts={frequency:0,draws:0};
+      const read=AnalyserNode.prototype.getFloatFrequencyData;
+      AnalyserNode.prototype.getFloatFrequencyData=function(...args){window.workCounts.frequency++;return read.apply(this,args);};
+      const extension=WebGLRenderingContext.prototype.getExtension,wrapped=new WeakSet();
+      WebGLRenderingContext.prototype.getExtension=function(name){
+        const ext=extension.call(this,name);
+        if(name==='ANGLE_instanced_arrays'&&ext&&!wrapped.has(ext)){
+          wrapped.add(ext);const draw=ext.drawArraysInstancedANGLE.bind(ext);
+          ext.drawArraysInstancedANGLE=(...args)=>{window.workCounts.draws++;return draw(...args);};
+        }
+        return ext;
+      };
+    });
+    await page.goto(shared({...defaults,noiseLevel:20}));
+    await page.getByRole('button',{name:'Play',exact:true}).tap();
+    await expect(page.locator('.fft-trace')).toHaveAttribute('data-state','live');
+    await page.evaluate(()=>{window.workCounts={frequency:0,draws:0};});
+    await page.waitForTimeout(600);
+    const work=await page.evaluate(()=>window.workCounts);
+    expect(work.frequency).toBeGreaterThan(8); expect(work.frequency).toBeLessThanOrEqual(22);
+    expect(work.draws).toBeGreaterThan(8); expect(work.draws).toBeLessThanOrEqual(62);
+    await page.getByRole('slider',{name:'Drive',exact:true}).scrollIntoViewIfNeeded();
+    await page.waitForTimeout(120);
+    const frozen=await page.locator('.pond').evaluate(root=>{
+      window.frozenAnimations=root.getAnimations({subtree:true}).filter(a=>a.effect.getTiming().iterations===Infinity);
+      return window.frozenAnimations.map(a=>a.currentTime);
+    });
+    expect(frozen.length).toBeGreaterThan(0);
+    await page.waitForTimeout(180);
+    expect(await page.evaluate(()=>window.frozenAnimations.map(a=>a.currentTime))).toEqual(frozen);
+    await page.evaluate(times=>window.freezeTimes=times,frozen);
+    await page.locator('.fish-card').scrollIntoViewIfNeeded();
+    await expect.poll(()=>page.evaluate(()=>window.frozenAnimations.some((a,i)=>a.currentTime>window.freezeTimes[i])),{timeout:1000}).toBeTruthy();
+    await page.getByRole('button',{name:'Stop',exact:true}).tap();
+    await page.waitForTimeout(80);
+    const stopped=await page.evaluate(()=>({...window.workCounts}));
+    await page.waitForTimeout(160);
+    expect(await page.evaluate(()=>window.workCounts)).toEqual(stopped);
+  });
+});

@@ -1,3 +1,5 @@
+import { createFrameLoop } from "../src/frame-loop.js";
+import { spectrumPoints, spectrumPath } from "../src/spectrum.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { oscillationPath, smoothTrace } from "../src/oscilloscope.js";
@@ -80,84 +82,26 @@ test("oscilloscope keeps its phase when harmonics and interference move zero cro
     assert.ok(Math.abs(firstY - (42 - (0.09 * Math.sin(2.4) + dc) * 152)) < 0.02);
   }
 });
-test("unison sharing round trips and legacy links discard bypassed processing", () => {
-  const settings = {
-    ...defaults,
-    unisonVoices: 7,
-    unisonDetune: 12.5,
-    drive: 6.14159,
-    cutoff: 1000.5,
-    noiseLevel: 17.5,
-    resonance: 47,
-  };
-  assert.deepEqual(decodeSettings(encodeSettings(settings)), { settings });
-  for (const value of [
-    "",
-    "x",
-    ",".repeat(16),
-    encodeSettings({ ...defaults, note: 36.5 }),
-    encodeSettings({ ...defaults, note: 11 }),
-    encodeSettings({ ...defaults, note: 85 }),
-    encodeSettings({ ...defaults, unisonVoices: 0 }),
-    encodeSettings({ ...defaults, unisonVoices: 8 }),
-    encodeSettings({ ...defaults, unisonVoices: 1.5 }),
-    encodeSettings({ ...defaults, unisonDetune: 76 }),
-    encodeSettings({ ...defaults, noiseLevel: 31 }),
-    encodeSettings({ ...defaults, drive: 30.1 }),
-    encodeSettings({ ...defaults, resonance: 101 }),
-    encodeSettings({ ...defaults, unisonWidth: 101 }),
-    encodeSettings({ ...defaults, unisonWidth: -1 }),
-    "13,36,2,9,0,1800,0,25,101",
-    "13,36,2,9,0,1800,0,25,-1",
-    "12,36,2,9,0,1800,0,25,19,1",
-    "12,36,2,9,0,1800,0,25,1000,0",
-    encodeSettings(defaults).replace(/^17,/, "18,"),
-    "9,36,2,9,0,1800,0,25,0,70,101",
-    "10,36,2,9,0,1800,0,25,101,70",
-    "10,36,2,9,0,1800,0,25,25,-1",
-    "10,36,2,9,0,1800,0,25",
-    "0".repeat(257),
-  ])
-    assert.equal(decodeSettings(value), null, value);
-  for (const value of [
-    "2,0,0,36,9,4,-8,1800",
-    "1,0,0,36,9,4,-8,1800,20,3,0,4,0,1.2,0.3,1",
-  ])
-    assert.deepEqual(decodeSettings(value), {
-      settings: { ...defaults, unisonWidth: 0, drive: 5 },
-    });
-  assert.deepEqual(decodeSettings("3,0,0,36,100,24,-8,1800,100"), {
-    settings: {
-      ...defaults,
-      unisonWidth: 0,
-      drive: 24,
-      unisonDetune: 75,
-      noiseLevel: 20,
-    },
-  });
-  assert.deepEqual(
-    decodeSettings(encodeSettings({ ...defaults, noiseLevel: 30 })),
-    {
-      settings: { ...defaults, noiseLevel: 20 },
-    },
-  );
-  for (const value of [
-    "4,0,0,36,9,25,1800,0",
-    "5,0,0,36,9,25,1800,0,2,4",
-    "6,1,1,36,9,25,1800,0,20,4,0,100",
-    "7,36,2,9,0,1800,0,25",
-    "11,36,2,9,0,1800,0,25",
-    "13,36,2,9,0,1800,0,25,100",
-    "12,36,2,9,0,1800,0,25,1000,1",
-    "8,36,2,9,0,1800,0,25,0,70",
-    "10,36,2,9,0,1800,0,25,100,100",
-    "9,36,2,9,0,1800,0,25,0,70,37",
-    "9,36,2,9,0,1800,0,25,0,70,0",
-    "9,36,2,9,0,1800,0,25,0,70,100",
-  ])
-    assert.deepEqual(decodeSettings(value), {
-      settings: { ...defaults, unisonWidth: 0 },
-    });
+test("version 1 sharing round trips current settings and rejects invalid packets", () => {
+  const settings = {...defaults,unisonVoices:5,unisonDetune:12.5,drive:16.14159,cutoff:1000.5,noiseLevel:17.5,resonance:47};
+  const encoded = encodeSettings(settings);
+  assert.ok(encoded.startsWith("1,"));
+  assert.equal(encoded.split(",").length,9);
+  assert.deepEqual(decodeSettings(encoded),{settings});
+  for (const value of [undefined,null,123,"","x",",".repeat(8),"0".repeat(257),
+    encoded+",0",encoded.split(",").slice(0,-1).join(","),encoded.replace("16.14159","Infinity"),
+    encoded.replace("16.14159","NaN"),encodeSettings({...defaults,note:36.5}),
+    encodeSettings({...defaults,unisonVoices:1.5})]) assert.equal(decodeSettings(value),null);
+  for (const [key,parameter] of Object.entries(parameters)) {
+    for (const invalid of [parameter.min-1,parameter.max+1])
+      assert.equal(decodeSettings(encodeSettings({...defaults,[key]:invalid})),null,`${key}: ${invalid}`);
+  }
+});
+
+test("share links reject unsupported versions and obsolete packet layouts", () => {
+  for (const version of [0,...Array.from({length:16},(_,index)=>index+2)])
+    assert.equal(decodeSettings(encodeSettings(defaults).replace(/^1,/,`${version},`)),null);
+  assert.equal(decodeSettings("1,0,0,36,9,4,-8,1800,20,3,0,4,0,1.2,0.3,1"),null);
 });
 
 test("unison has one centered voice or a symmetric evenly spaced spread", () => {
@@ -211,8 +155,8 @@ test("parabolic saturation is odd, bounded, monotonic and preserves silence", ()
 });
 test("drive uses parabolic saturation from its minimum gain", () => {
   for (const x of [-10, -1, -0.5, 0, 0.5, 1, 10])
-    assert.equal(driveSample(x, 5), parabolicSample(x * 10 ** (5 / 20)));
-  for (const db of [5, 7, 15, 25]) {
+    assert.equal(driveSample(x, 10), parabolicSample(x * 10 ** (10 / 20)));
+  for (const db of [10, 12, 15, 25]) {
     const gain = 10 ** (db / 20);
     // Compare curvature at a fixed level after the input gain.
     assert.ok(
@@ -256,16 +200,18 @@ test("WAV interleaves stereo PCM", async () => {
   assert.equal(data.getUint32(40, true), 16);
 });
 
-test("manual outer octaves share correctly while random notes stay in the original range", () => {
+test("manual outer octaves share correctly while random notes stay in C1–C3", () => {
   for (const note of [12, 23, 60, 83, 84]) {
     const settings = { ...defaults, note };
     assert.deepEqual(decodeSettings(encodeSettings(settings)), { settings });
     assert.equal(randomSettings(settings, { note: true }).note, note);
   }
+  assert.equal(randomSettings(defaults, {}, () => 0).note,24);
+  assert.equal(randomSettings(defaults, {}, () => 1-Number.EPSILON).note,48);
   const random = seededRandom(83);
   for (let index = 0; index < 500; index++) {
     const note = randomSettings({ ...defaults, note: index % 2 ? 12 : 84 }, {}, random).note;
-    assert.ok(note >= 28 && note <= 52);
+    assert.ok(note >= 24 && note <= 48);
   }
 });
 
@@ -314,34 +260,32 @@ test("FFT silence is flat and cached layouts preserve peaks across sample rates"
 });
 
 
-test("drive caps at 25 dB, including historical share links and audio input", () => {
+test("drive caps at 25 dB and rejects out-of-range shared values", () => {
   assert.equal(parameters.drive.max,25);
-  for (const link of ["14,36,2,9,0,1800,0,30",encodeSettings({...defaults,drive:30})])
-    assert.equal(decodeSettings(link).settings.drive,25);
+  assert.equal(decodeSettings(encodeSettings({...defaults,drive:30})),null);
   assert.equal(decodeSettings(encodeSettings({...defaults,drive:30.1})),null);
   assert.equal(driveSample(0.02,30),driveSample(0.02,25));
 });
 
 
-test("drive floors at 5 dB across shared links and audio", () => {
-  assert.equal(parameters.drive.min,5);
-  for (const drive of [0,3,4.9]) {
-    assert.equal(decodeSettings(encodeSettings({...defaults,drive})).settings.drive,5);
-    assert.equal(driveSample(0.1,drive),driveSample(0.1,5));
+test("drive floors at 10 dB across shared links and audio", () => {
+  assert.equal(parameters.drive.min,10);
+  for (const drive of [0,3,5,9.9]) {
+    assert.equal(decodeSettings(encodeSettings({...defaults,drive})),null);
+    assert.equal(driveSample(0.1,drive),driveSample(0.1,10));
   }
   assert.equal(decodeSettings(encodeSettings({...defaults,drive:-1})),null);
 });
 
 
-test("cutoff caps at 10 kHz while preserving historical shared sounds", () => {
+test("cutoff caps at 10 kHz and rejects out-of-range shared values", () => {
   assert.equal(parameters.cutoff.max,10000);
-  assert.equal(decodeSettings(encodeSettings({...defaults,cutoff:12000})).settings.cutoff,10000);
-  assert.equal(decodeSettings("14,36,2,9,0,12000,0,25").settings.cutoff,10000);
+  assert.equal(decodeSettings(encodeSettings({...defaults,cutoff:12000})),null);
   assert.equal(decodeSettings(encodeSettings({...defaults,cutoff:12000.1})),null);
 });
 
 
-test("cutoff floors at 75 Hz and preserves historical valid values", () => {
+test("cutoff floors at 75 Hz", () => {
   assert.equal(parameters.cutoff.min,75);
   for (const cutoff of [75,80,90,99])
     assert.equal(decodeSettings(encodeSettings({...defaults,cutoff})).settings.cutoff,cutoff);
@@ -349,10 +293,72 @@ test("cutoff floors at 75 Hz and preserves historical valid values", () => {
 });
 
 
-test("retired noise width is validated and discarded from shared links", () => {
-  for (const width of [0,50,100])
-    assert.deepEqual(decodeSettings(`16,36,2,9,0,1800,0,25,75,${width}`),{settings:{...defaults}});
-  for (const width of [-1,101])
-    assert.equal(decodeSettings(`16,36,2,9,0,1800,0,25,75,${width}`),null);
-  assert.deepEqual(decodeSettings("15,36,2,9,0,1800,0,25,75"),{settings:{...defaults}});
+test("GPU spectrum points preserve peaks and reuse storage", () => {
+  for (const rate of [44100, 48000, 96000]) {
+    const samples = Float32Array.from({length: 8192}, (_, i) => -96 + 84 * Math.abs(Math.sin(i * 0.017)));
+    const points = spectrumPoints(samples, rate);
+    const expected = [...spectrumPath(samples, rate).matchAll(/[ML]([\d.]+),([\d.]+)/g)].flatMap(match => [Number(match[1]), Number(match[2])]);
+    assert.equal(points.length, expected.length);
+    for (let i = 0; i < points.length; i++) assert.ok(Math.abs(points[i] - expected[i]) < 0.006);
+    samples.fill(-Infinity);
+    assert.equal(spectrumPoints(samples, rate, points), points);
+    for (let i = 1; i < points.length; i += 2) assert.equal(points[i], 90);
+  }
+});
+
+
+test("frame caps retain cadence on 60/90/120/144 Hz displays and cancel cleanly", () => {
+  const request = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame;
+  try {
+    for (const refresh of [60,90,120,144]) for (const cap of [30,60]) {
+      let serial = 0, ticks = 0;
+      const pending = new Map();
+      globalThis.requestAnimationFrame = callback => { pending.set(++serial,callback); return serial; };
+      globalThis.cancelAnimationFrame = id => pending.delete(id);
+      const loop = createFrameLoop(() => ticks++,cap);
+      loop.start(); loop.start();
+      assert.equal(pending.size,1);
+      for(let time=0;time<1000;time+=1000/refresh) {
+        const callbacks=[...pending.values()];pending.clear();
+        callbacks.forEach(callback => callback(time));
+      }
+      assert.ok(Math.abs(ticks-cap)<=1, `${refresh} Hz / ${cap} fps: ${ticks}`);
+      loop.stop(); assert.equal(pending.size,0);
+    }
+    let callback, canceled = false;
+    globalThis.requestAnimationFrame = cb => {callback=cb;return 1;};
+    globalThis.cancelAnimationFrame = () => {canceled=true;};
+    const loop = createFrameLoop(() => loop.stop());
+    loop.start();callback(0);
+    assert.equal(canceled,true);
+  } finally {
+    if(request)globalThis.requestAnimationFrame=request;else delete globalThis.requestAnimationFrame;
+    if(cancel)globalThis.cancelAnimationFrame=cancel;else delete globalThis.cancelAnimationFrame;
+  }
+});
+
+test("viewport-sized spectrum reduction preserves narrow peaks with fewer points", () => {
+  const samples=new Float32Array(8192).fill(-Infinity),rate=48000;
+  for(const bin of [18,22,30,3000,6000])samples[bin]=-12;
+  const full=spectrumPoints(samples,rate);
+  for(const columns of [128,320,375]) {
+    const compact=spectrumPoints(samples,rate,undefined,columns);
+    assert.ok(compact.length<full.length);
+    for(let group=0;group<Math.floor(compact.length/2)-2;group++) {
+      assert.ok(Number.isFinite(compact[group*2]));
+    }
+    for(const bin of [18,22,30,3000,6000]) {
+      const x=Math.log(bin*rate/16384/20)*720/Math.log(20000/20);
+      assert.ok([...compact].some((value,i)=>i%2===0&&Math.abs(value-x)<0.001&&compact[i+1]===2));
+    }
+    assert.equal(spectrumPoints(samples,rate,compact,columns),compact);
+  }
+});
+
+
+test("unison caps at five and rejects larger shared counts", () => {
+  assert.equal(parameters.unisonVoices.max,5);
+  assert.equal(decodeSettings(encodeSettings({...defaults,unisonVoices:5})).settings.unisonVoices,5);
+  for (const count of [0,5.5,6,6.5,7,8])
+    assert.equal(decodeSettings(encodeSettings({...defaults,unisonVoices:count})),null);
 });

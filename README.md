@@ -10,7 +10,7 @@ npm run dev
 
 ## Controls and processing
 
-- **Unison voices:** 1–7 sawtooth voices, default 2. All voices use the same selected note.
+- **Unison voices:** 1–5 sawtooth voices, default 2. All voices use the same selected note.
 
 - **Unison detune:** 0–75 cents. Voices are evenly spread from −detune to +detune. One voice is centered and ignores detune. Voice levels are normalized by count, and count/detune changes work during playback.
 
@@ -46,7 +46,7 @@ There is no amplitude control. Cutoff LFO code is retained behind `cutoffLfoEnab
 
 ## Notes and playback
 
-The piano supports mouse, touch, computer keys, and optional Web MIDI. Octave views range from 0–4, covering notes C0–C6. Random notes remain in the original E1–E3 range (MIDI 28–52). A4 = 440 Hz; the displayed keyboard defaults to octave 1.
+The piano supports mouse, touch, computer keys, and optional Web MIDI. Octave views range from 0–4, covering notes C0–C6. Random notes range from C1 through C3 inclusive (MIDI 24–48), fitting entirely in octave view 1. A4 = 440 Hz; the displayed keyboard defaults to octave 1.
 
 Hold and drag across the piano to follow the key under the mouse or finger, including black keys. Moving outside the keys releases that input; moving back onto a key while still held resumes it. Release or touch cancellation releases that input and returns to any other held note.
 
@@ -66,7 +66,7 @@ While playing, the fish vibrates. Noise increases the strength (0.15–1 SVG pix
 
 The app starts silently from its default settings, ready for keyboard experimentation. Randomize explores new sounds while respecting individual parameter locks; Reset restores defaults and stops playback. Light/dark themes, URL sharing, WAV downloads, and SVG fish downloads are included. Sound processing runs locally.
 
-Version 17 share links carry all eight sound parameters. Version 16 noise width is validated and discarded. Version 13 chorus mix is validated and discarded; version 12 notch values are validated and discarded. Older links discard the removed chorus controls; version 9 links also discard their obsolete final control and use symmetric drive. Links from before unison map their two tonal oscillators to two sawtooth voices, preserve supported note/detune/noise/filter/resonance/drive values, and discard obsolete processing settings. Their original waveform choices are replaced by sawtooth.
+Version 1 share links carry the eight current sound parameters. Unsupported versions, obsolete layouts, and values outside current limits are rejected.
 
 The live oscilloscope shows two note periods from the actual audio output, including unison interference and parameter changes. It follows the pitch during glides and refreshes at half the note frequency, capped by the display frame rate. A continuous phase reference keeps the trace aligned as the sound changes. A fixed capture buffer avoids resizing during glides, and a short 25 ms display smoothing time softens capture steps without changing the audio.
 
@@ -126,15 +126,15 @@ Performance: cache logarithmic FFT layouts and shared filter responses with boun
 
 `npm test` runs unit and browser checks, owning and closing its Vite server directly to avoid Windows process-tree teardown stalls. Existing test servers and BASSIFIER_TEST_URL remain supported.
 
-Drive is capped at 25 dB for controls, randomization, and audio; historical shared values up to 30 dB clamp to 25 dB.
+Drive is capped at 25 dB for controls, randomization, and audio.
 
 The fish closes its eye while silent and opens it during playback or held notes. Static SVG exports use the closed-eye resting pose.
 
-Minimum drive is 5 dB; historical nonnegative shared values below 5 dB clamp to 5 dB.
+Minimum drive is 10 dB.
 
-Low-pass cutoff is capped at 10 kHz; historical shared values up to 12 kHz clamp to 10 kHz.
+Low-pass cutoff is capped at 10 kHz.
 
-Minimum low-pass cutoff is 75 Hz, with 5 Hz steps. Historical cutoff values of 80 Hz and above remain valid.
+Minimum low-pass cutoff is 75 Hz, with 5 Hz steps.
 
 Center the visible fish geometry horizontally and vertically for every body size and morph, keeping drag/swim transforms independent. Static SVG exports recenter the resting pose.
 

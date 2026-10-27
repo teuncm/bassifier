@@ -59,10 +59,21 @@
 }
 * {
   box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+html {
+  touch-action: pan-y;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 body {
   margin: 0;
   min-width: 300px;
+  overscroll-behavior: none;
 }
 button,
 input,
@@ -227,7 +238,7 @@ button {
 .side-column {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 .card {
@@ -242,7 +253,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 12px 16px 8px;
+  padding: 9px 16px 6px;
 }
 .small-caption {
   font-size: 11px;
@@ -255,7 +266,7 @@ button {
   color: var(--muted);
 }
 .playback-card {
-  padding-bottom: 10px;
+  padding-bottom: 8px;
 }
 .playback-heading {
   padding-bottom: 5px;
@@ -267,22 +278,10 @@ button {
   overflow: hidden;
   color: var(--accent);
 }
-.waveform svg {
+.waveform canvas {
+  display: block;
   width: 100%;
   height: 100%;
-}
-.waveform-trace,
-.waveform-glow {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-}
-.waveform-glow {
-  stroke-width: 4.5;
-  opacity: 0.12;
 }
 .player-controls {
   display: flex;
@@ -368,11 +367,11 @@ kbd {
   background: var(--surface-soft);
 }
 .piano-card {
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   overflow: hidden;
 }
 .piano-card .section-heading {
-  padding-bottom: 8px;
+  padding-bottom: 6px;
 }
 .midi-button {
   max-width: 72%;
@@ -393,7 +392,7 @@ kbd {
   color: var(--accent);
 }
 .piano-info {
-  padding: 0 16px 10px;
+  padding: 0 16px 6px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -458,7 +457,7 @@ kbd {
 }
 .piano {
   position: relative;
-  height: 100px;
+  height: 86px;
   margin: 0 16px;
   touch-action: none;
 }
@@ -485,7 +484,7 @@ kbd {
   color: #442c2c;
 }
 .piano-key.black {
-  height: 70%;
+  height: 60%;
   z-index: 2;
   background: #443332;
   border-color: #302323;
@@ -551,10 +550,10 @@ kbd {
   pointer-events: none;
 }
 .synth-card {
-  padding-bottom: 10px;
+  padding-bottom: 8px;
 }
 .synth-card .section-heading {
-  padding-bottom: 8px;
+  padding-bottom: 6px;
 }
 .action-row {
   display: flex;
@@ -611,7 +610,7 @@ kbd {
   font-size: 12px;
 }
 .control-group {
-  margin: 0 12px 9px;
+  margin: 0 12px 7px;
   background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -666,7 +665,7 @@ kbd {
   transform: rotate(-90deg);
 }
 .group-body {
-  padding: 10px 12px;
+  padding: 8px 12px;
 }
 .paired-controls {
   display: grid;
@@ -966,7 +965,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   .fish-trail { display: none; }
 }
 .fish-card .section-heading {
-  padding: 12px 16px 8px;
+  padding: 9px 16px 6px;
 }
 .fish-type {
   font-size: 8px;
@@ -1033,6 +1032,28 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   overflow: visible;
   filter: drop-shadow(0 10px 7px #602d2618);
 }
+.fish-ghost-bubble {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  z-index: 21;
+  width: 144px;
+  height: 144px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--interaction) 35%, transparent);
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 22%, #ffffff70, transparent 35%),
+    color-mix(in srgb, var(--surface) 75%, transparent);
+  box-shadow: inset -5px -7px 16px var(--accent-soft), 0 4px 20px #00000012;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.fish-ghost-bubble svg { width: 94%; overflow: visible; opacity: 0.65; }
+.fish-ghost-enter-active, .fish-ghost-leave-active { transition: opacity 180ms, transform 180ms; }
+.fish-ghost-enter-from, .fish-ghost-leave-to { opacity: 0; transform: translateY(8px) scale(0.92); }
+@media (max-width: 1023px) {
+  .fish-ghost-bubble { width: 120px; height: 120px; }
+}
 .fish-heading {
   transform-origin: 150px 135px;
   transition: rotate 160ms ease;
@@ -1040,6 +1061,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
 .fish-propulsion {
   transform-origin: 150px 135px;
 }
+.fish-draggable.returning .fish-heading { transition: none; }
 .fish-draggable.returning .fish-swim {
   animation: none;
 }
@@ -1155,8 +1177,10 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   padding: 7px;
   border: 1px solid var(--strong-border);
   border-radius: 5px;
-  font-size: 11px;
-  user-select: text;
+  font-size: 16px;
+}
+.share-fallback .text-button {
+  margin-top: 8px;
 }
 .master-card .section-heading {
   padding-bottom: 16px;
@@ -1172,7 +1196,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   margin-top: 19px;
 }
 .master-card .control-group {
-  margin: 0 12px 9px;
+  margin: 0 12px 7px;
 }
 .timing-help {
   font-size: 9px;
@@ -1399,10 +1423,10 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   }
   .main-column,
   .side-column {
-    gap: 12px;
+    gap: 10px;
   }
   .piano {
-    height: 108px;
+    height: 92px;
   }
 }
 @media (max-width: 1023px) {
@@ -1411,12 +1435,12 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     margin-top: 16px;
   }
   html {
-    scroll-padding-bottom: calc(8rem + env(safe-area-inset-bottom));
+    scroll-padding-bottom: calc(10rem + env(safe-area-inset-bottom));
   }
   .app-shell {
     max-width: 760px;
-    padding: 0 max(18px, env(safe-area-inset-left))
-      calc(8rem + env(safe-area-inset-bottom));
+    padding: env(safe-area-inset-top) max(18px, env(safe-area-inset-left))
+      calc(10rem + env(safe-area-inset-bottom));
   }
   .site-header {
     height: 82px;
@@ -1425,7 +1449,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   .workspace {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
   .main-column,
   .side-column {
@@ -1436,7 +1460,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     width: 100%;
   }
   .fish-card .section-heading {
-    padding: 10px 14px 7px;
+    padding: 8px 14px 5px;
   }
   .fish-card .pond {
     display: flex;
@@ -1511,8 +1535,8 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     border-left: 0;
     border-right: 0;
     border-bottom: 0;
-    padding: 7px max(18px, env(safe-area-inset-left))
-      calc(12px + env(safe-area-inset-bottom));
+    padding: 4px env(safe-area-inset-right)
+      calc(6px + env(safe-area-inset-bottom)) env(safe-area-inset-left);
     box-shadow: 0 -3px 12px #00000008;
   }
   .playback-heading {
@@ -1520,11 +1544,12 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   }
   .waveform {
     height: 32px;
-    max-width: 720px;
-    margin: 0 auto 4px;
+    max-width: none;
+    margin: 0 0 2px;
   }
   .player-controls {
-    padding: 0;
+    padding: 0 10px;
+    gap: 12px;
     max-width: 720px;
     margin: 0 auto;
   }
@@ -1542,7 +1567,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     gap: 7px;
   }
   .piano {
-    height: 108px;
+    height: 92px;
   }
 }
 @media (max-width: 560px) {
@@ -1573,10 +1598,10 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     width: 31px;
   }
   .main-column {
-    gap: 12px;
+    gap: 10px;
   }
   .section-heading {
-    padding: 11px 14px 8px;
+    padding: 8px 14px 6px;
   }
   .section-label {
     font-size: 7px;
@@ -1586,7 +1611,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     border-radius: 12px;
   }
   .piano-info {
-    padding: 0 14px 9px;
+    padding: 0 14px 6px;
   }
   .selected-tone {
     gap: 7px;
@@ -1605,7 +1630,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     margin-right: 2px;
   }
   .piano {
-    height: 94px;
+    height: 80px;
     margin: 0 14px;
   }
   .key-shortcut {
@@ -1636,10 +1661,10 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     gap: 4px;
   }
   .control-group {
-    margin: 0 9px 8px;
+    margin: 0 9px 6px;
   }
   .group-body {
-    padding: 9px 11px 10px;
+    padding: 7px 11px 8px;
   }
   .paired-controls {
     grid-template-columns: 1fr;
@@ -1694,7 +1719,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     gap: 14px;
   }
   .master-card .control-group {
-    margin: 0 9px 8px;
+    margin: 0 9px 6px;
   }
   .master-amplitude {
     margin-left: 22px;
@@ -1734,7 +1759,7 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
     margin-left: auto;
   }
   .player-controls {
-    padding: 2px 0 0;
+    padding: 0 10px;
   }
   .playback-card {
     border-radius: 0;
@@ -1795,13 +1820,15 @@ input[type="range"]:is(:active, :focus-visible, .interacting)::-moz-range-thumb 
   }
 }
 
-.fft-card { padding-bottom: 8px; }
+.fft-card { padding-bottom: 6px; }
 .fft-display { margin: 0 16px; }
-.fft-display svg { display: block; width: 100%; height: 100px; }
-.fft-trace { fill: none; stroke: var(--visual-signal); stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.fft-display canvas { display: block; width: 100%; height: 100px; color: var(--visual-signal); }
 .playback-card .fft-card { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 @media (max-width: 1023px) {
-  .fft-card { order: 2; width: 100%; }
+  .playback-card .fft-card { padding-bottom: 2px; }
+  .playback-card .fft-card .section-heading { display: none; }
+  .fft-display { margin: 0; max-width: none; }
+  .fft-display canvas { height: 52px; }
 }
 
 

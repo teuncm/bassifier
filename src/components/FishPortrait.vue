@@ -4,11 +4,14 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  useId,
   watch,
 } from "vue";
 import { noteFrequency, parameters, seededRandom, signature } from "../settings.js";
 import { filterResponse } from "../filter-response.js";
 import FishBody from "./FishBody.vue";
+import { createFrameLoop } from "../frame-loop.js";
+import { createAnimationClock } from "../animation-clock.js";
 const props = defineProps({
   settings: Object,
   playing: Boolean,
@@ -17,34 +20,98 @@ const props = defineProps({
   sampleRate: { type: Number, default: 44100 },
 });
 const svg = ref(null),
-  fish = ref(null);
+  fish = ref(null), centering = ref(null);
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const previewId = `fish-preview-${useId()}`;
+const ghostVisible = ref(false), playerHeight = ref(0);
+let ghostTimer, visibilityObserver, playerObserver;
+const fishVisible = ref(true);
+let animationClock;
+function hideGhost() {
+  clearTimeout(ghostTimer);
+  ghostVisible.value = false;
+}
+function checkFishVisibility() {
+  const bounds = fish.value?.getBoundingClientRect();
+  if (!bounds) return;
+  const bottom = window.innerHeight - playerHeight.value;
+  fishVisible.value = bounds.bottom > 0 && bounds.top < bottom && bounds.right > 0 && bounds.left < window.innerWidth;
+  if (fishVisible.value) hideGhost();
+}
+function observeFish() {
+  const player = document.querySelector(".playback-card");
+  playerHeight.value = player && getComputedStyle(player).position === "fixed"
+    ? player.getBoundingClientRect().height : 0;
+  visibilityObserver?.disconnect();
+  visibilityObserver = new IntersectionObserver(([entry]) => {
+    fishVisible.value = entry.isIntersecting;
+    if (fishVisible.value) hideGhost();
+  }, {
+    rootMargin: `0px 0px -${playerHeight.value}px 0px`,
+  });
+  visibilityObserver.observe(fish.value);
+  checkFishVisibility();
+}
+watch(() => signature(props.settings), () => {
+  if (fishVisible.value || dragging.value || returning.value) return;
+  clearTimeout(ghostTimer);
+  ghostVisible.value = true;
+  ghostTimer = setTimeout(hideGhost, 2000);
+});
 const appearance = ref({ ...props.settings });
 const dragging = ref(false),
   returning = ref(false),
-  heading = ref({ right: false, angle: 0 }),
-  returnStroke = ref({ sway: 0, yaw: 0, tail: 0, fin: 0 }),
-  offset = ref({ x: 0, y: 0 }),
   gaze = ref({ x: -3, y: 1 }),
   popPhase = ref(""),
   burstKey = ref(0),
   particles = ref([]),
   burstPosition = ref({ x: 50, y: 55 });
+let heading = { right: false, angle: 0 },
+  returnStroke = { sway: 0, yaw: 0, tail: 0, fin: 0 },
+  offset = { x: 0, y: 0 };
+const headingNode = ref(null), propulsionNode = ref(null);
+let tailNode, finNode;
+function applyPose() {
+  if (fish.value) fish.value.style.transform = `translate(${offset.x}px, ${offset.y}px)`;
+  if (headingNode.value) {
+    headingNode.value.style.transform = `scaleX(${heading.right ? -1 : 1})`;
+    headingNode.value.style.rotate = `${heading.angle}deg`;
+  }
+  if (propulsionNode.value)
+    propulsionNode.value.style.transform = `translateY(${returnStroke.sway}px) rotate(${returnStroke.yaw}deg)`;
+  if (tailNode) tailNode.style.transform = `rotate(${returnStroke.tail}deg)`;
+  if (finNode) finNode.style.transform = `rotate(${returnStroke.fin}deg)`;
+}
+function cachePoseNodes() {
+  tailNode = svg.value?.querySelector('.fish-tail');
+  finNode = svg.value?.querySelector('.fish-fin');
+  applyPose();
+}
+function refreshAnimations() {
+  animationClock?.refresh(fishVisible.value && !document.hidden);
+}
+watch(burstKey, cachePoseNodes, { flush: 'post' });
 const trailBubbles = ref([]);
 let trailFrame, bubbleId = 0, lastBubbleTime = -Infinity;
-let origin, popTimer, particleTimer, mouthFrame, returnFrame;
+let origin, popTimer, particleTimer;
+const mouthLoop = createFrameLoop(syncMouth);
+let returnStep;
+const returnLoop = createFrameLoop(now => returnStep?.(now));
 function clearTrail() {
-  cancelAnimationFrame(trailFrame);
+  clearTimeout(trailFrame);
   trailBubbles.value = [];
   lastBubbleTime = -Infinity;
 }
-function ageTrail(now) {
+function ageTrail() {
+  const now = performance.now();
   trailBubbles.value = trailBubbles.value.filter((bubble) => now - bubble.born < 900);
-  if (trailBubbles.value.length) trailFrame = requestAnimationFrame(ageTrail);
+  if (trailBubbles.value.length)
+    trailFrame = setTimeout(ageTrail, Math.max(1, trailBubbles.value[0].born + 900 - now));
 }
 function leaveBubble(now = performance.now()) {
   if (
     now - lastBubbleTime < 80 ||
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    reducedMotion.matches
   ) return;
   const matrix = svg.value?.querySelector(".fish-tail")?.getScreenCTM();
   if (!matrix) return;
@@ -53,7 +120,7 @@ function leaveBubble(now = performance.now()) {
   const id = ++bubbleId;
   const empty = !trailBubbles.value.length;
   trailBubbles.value.push({ id, born: now, x: point.x, y: point.y, size: 4 + id % 4 * 2 });
-  if (empty) trailFrame = requestAnimationFrame(ageTrail);
+  if (empty) trailFrame = setTimeout(ageTrail, 900);
 }
 const beatFrequency = computed(() => {
   const frequency = noteFrequency(props.settings.note);
@@ -62,9 +129,10 @@ const beatFrequency = computed(() => {
     ? frequency * (detuneRatio - 1 / detuneRatio)
     : 0;
 });
+watch(() => [fishVisible.value, props.playing, returning.value, burstKey.value, beatFrequency.value > 0],
+  refreshAnimations, { flush: 'post' });
 function syncMouth() {
-  cancelAnimationFrame(mouthFrame);
-  if (!props.playing || !props.voice || !fish.value) return;
+  if (!props.playing || !props.voice || !fish.value || (!fishVisible.value && !ghostVisible.value)) { mouthLoop.stop(); return; }
   const ratio = 2 ** (props.settings.unisonDetune / 1200);
   const beat =
     props.settings.unisonVoices > 1
@@ -74,7 +142,8 @@ function syncMouth() {
     "--mouth-cycle",
     beat > 0 ? `${1 / beat}s` : "0s",
   );
-  if (props.voice.gliding) mouthFrame = requestAnimationFrame(syncMouth);
+  if (props.voice.gliding) mouthLoop.start();
+  else mouthLoop.stop();
 }
 watch(
   () => [
@@ -83,6 +152,8 @@ watch(
     props.settings.note,
     props.settings.unisonDetune,
     props.settings.unisonVoices,
+    fishVisible.value,
+    ghostVisible.value,
   ],
   syncMouth,
   { flush: "post" },
@@ -102,7 +173,6 @@ const eyes = computed(() => {
   };
 });
 const bodyScale = 0.98;
-const centerTransform = ref("translate(0 0)");
 function centeredTransform(bounds) {
   return `translate(${150 - bounds.x - bounds.width / 2} ${115 - bounds.y - bounds.height / 2})`;
 }
@@ -111,12 +181,12 @@ function centerFish() {
   const geometry = svg.value?.querySelector(".fish-body-parts");
   if (!geometry) return;
   const bounds = geometry.getBBox();
-  if (bounds.width && bounds.height) centerTransform.value = centeredTransform(bounds);
+  if (bounds.width && bounds.height) centering.value?.setAttribute("transform", centeredTransform(bounds));
 }
 watch(() => [signature(appearance.value), props.playing, burstKey.value, dragging.value, returning.value],
   centerFish, { flush: "post" });
 const mouth = computed(() => {
-  const voices = (appearance.value.unisonVoices - 1) / 6;
+  const voices = (appearance.value.unisonVoices - 1) / (parameters.unisonVoices.max - 1);
   const point = (x, y) =>
     `${83 + (x - 83) * (1 + voices * 1.35)} ${146 + (y - 146) * (1 + voices * 1.355)}`;
   return {
@@ -187,9 +257,9 @@ function down(event) {
   const transform = new DOMMatrix(getComputedStyle(fish.value).transform);
   const matrix = svg.value.getScreenCTM();
   const center = new DOMPoint(150, 135).matrixTransform(matrix);
-  cancelAnimationFrame(returnFrame);
+  returnLoop.stop();
   returning.value = false;
-  returnStroke.value = { sway: 0, yaw: 0, tail: 0, fin: 0 };
+  returnStroke = { sway: 0, yaw: 0, tail: 0, fin: 0 };
   origin = {
     id: event.pointerId,
     x: event.clientX,
@@ -198,7 +268,7 @@ function down(event) {
     center,
     scale: Math.hypot(matrix.a, matrix.b),
   };
-  offset.value = { ...origin.offset };
+  offset = { ...origin.offset };
   dragging.value = true;
   followAnchor(0, 0);
   event.currentTarget.setPointerCapture(event.pointerId);
@@ -209,14 +279,15 @@ function followAnchor(dx, dy) {
   aimBody(x, y);
   const length = Math.hypot(x, y);
   const amount = Math.min(4.5, length / (origin.scale * 12));
-  const angle = (heading.value.angle * Math.PI) / 180;
+  const angle = (heading.angle * Math.PI) / 180;
   const localX =
     (Math.cos(angle) * x + Math.sin(angle) * y) *
-    (heading.value.right ? -1 : 1);
+    (heading.right ? -1 : 1);
   const localY = -Math.sin(angle) * x + Math.cos(angle) * y;
   gaze.value = length
     ? { x: (localX / length) * amount, y: (localY / length) * amount }
     : { x: 0, y: 0 };
+  applyPose();
 }
 function move(event) {
   if (!dragging.value || origin?.id !== event.pointerId) return;
@@ -226,7 +297,7 @@ function move(event) {
   }
   const dx = event.clientX - origin.x,
     dy = event.clientY - origin.y;
-  offset.value = { x: origin.offset.x + dx, y: origin.offset.y + dy };
+  offset = { x: origin.offset.x + dx, y: origin.offset.y + dy };
   followAnchor(dx, dy);
   leaveBubble();
 }
@@ -240,7 +311,7 @@ function release(event) {
   if (
     event?.pointerId !== undefined &&
     event?.type !== "blur" &&
-    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    !reducedMotion.matches
   )
     swimHome();
   else {
@@ -249,23 +320,24 @@ function release(event) {
   }
 }
 function resetHome() {
-  cancelAnimationFrame(returnFrame);
+  returnLoop.stop();
   returning.value = false;
-  offset.value = { x: 0, y: 0 };
-  heading.value = { right: false, angle: 0 };
-  returnStroke.value = { sway: 0, yaw: 0, tail: 0, fin: 0 };
+  offset = { x: 0, y: 0 };
+  heading = { right: false, angle: 0 };
+  returnStroke = { sway: 0, yaw: 0, tail: 0, fin: 0 };
   gaze.value = { x: -3, y: 1 };
+  applyPose();
 }
 function aimBody(x, y) {
   if (Math.hypot(x, y) < 0.01) return;
   const right =
-    Math.abs(x) < Math.hypot(x, y) * 0.08 ? heading.value.right : x > 0;
+    Math.abs(x) < Math.hypot(x, y) * 0.08 ? heading.right : x > 0;
   const angle = (Math.atan2(y, Math.abs(x)) * (right ? 1 : -1) * 180) / Math.PI;
-  heading.value = { right, angle: Math.max(-85, Math.min(85, angle)) };
+  heading = { right, angle: Math.max(-85, Math.min(85, angle)) };
 }
 function swimHome() {
-  cancelAnimationFrame(returnFrame);
-  const start = { ...offset.value };
+  returnLoop.stop();
+  const start = { ...offset };
   const distance = Math.hypot(start.x, start.y);
   if (distance < 2) {
     resetHome();
@@ -279,8 +351,9 @@ function swimHome() {
   returning.value = true;
   gaze.value = { x: -4, y: 0 };
   aimBody(-start.x, -start.y);
+  applyPose();
   function step(now) {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (reducedMotion.matches) {
       resetHome();
       return;
     }
@@ -293,7 +366,7 @@ function swimHome() {
     const bend = Math.sin(Math.PI * progress) ** 2 * arc;
     const travelSpeed = 6 * progress * (1 - progress);
     const bendSpeed = Math.PI * Math.sin(2 * Math.PI * progress) * arc;
-    offset.value = {
+    offset = {
       x: start.x * (1 - travel) + (start.y / distance) * bend,
       y: start.y * (1 - travel) - (start.x / distance) * bend,
     };
@@ -308,16 +381,17 @@ function swimHome() {
       Math.PI *
       2;
     previous = now;
-    returnStroke.value = {
+    returnStroke = {
       sway: Math.sin(phase) * 1.8 * effort,
       yaw: Math.sin(phase + Math.PI * 0.25) * 2 * effort,
       tail: Math.sin(phase - Math.PI * 0.4) * 17 * effort,
       fin: -Math.sin(phase) * 9 * effort,
     };
+    applyPose();
     leaveBubble(now);
-    returnFrame = requestAnimationFrame(step);
   }
-  returnFrame = requestAnimationFrame(step);
+  returnStep = step;
+  returnLoop.start();
 }
 watch(
   () => [props.generation, signature(props.settings)],
@@ -325,13 +399,15 @@ watch(
     if (generation !== previousGeneration) {
       clearTimeout(popTimer);
       clearTimeout(particleTimer);
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      if (reducedMotion.matches) {
         release();
         Object.assign(appearance.value, props.settings);
         popPhase.value = "";
         particles.value = [];
         return;
       }
+      // Hold the current swimming position through the pop, then continue home.
+      if (returning.value) returnLoop.stop();
       const pond = fish.value.closest(".pond").getBoundingClientRect();
       const center = new DOMPoint(150, 135).matrixTransform(
         svg.value.getScreenCTM(),
@@ -363,11 +439,12 @@ watch(
       burstKey.value++;
       popPhase.value = "out";
       popTimer = setTimeout(() => {
-        release();
+        if (!returning.value) release();
         Object.assign(appearance.value, props.settings);
         popPhase.value = "in";
         popTimer = setTimeout(() => {
           popPhase.value = "";
+          if (returning.value) swimHome();
         }, 480);
       }, 120);
       particleTimer = setTimeout(() => {
@@ -420,19 +497,44 @@ function exportSvg() {
 defineExpose({ exportSvg });
 onMounted(() => {
   centerFish();
+  cachePoseNodes();
+  animationClock = createAnimationClock(fish.value.closest(".pond"));
+  refreshAnimations();
+  document.addEventListener("visibilitychange", refreshAnimations);
+  reducedMotion.addEventListener("change", refreshAnimations);
+  observeFish();
+  playerObserver = new ResizeObserver(observeFish);
+  const player = document.querySelector(".playback-card");
+  if (player) playerObserver.observe(player);
+  window.addEventListener("resize", observeFish);
   window.addEventListener("blur", release);
 });
 onBeforeUnmount(() => {
+  hideGhost();
+  animationClock?.stop();
+  document.removeEventListener("visibilitychange", refreshAnimations);
+  reducedMotion.removeEventListener("change", refreshAnimations);
+  visibilityObserver?.disconnect();
+  playerObserver?.disconnect();
+  window.removeEventListener("resize", observeFish);
   clearTimeout(popTimer);
   clearTimeout(particleTimer);
-  cancelAnimationFrame(mouthFrame);
-  cancelAnimationFrame(returnFrame);
+  mouthLoop.stop();
+  returnLoop.stop();
   clearTrail();
   window.removeEventListener("blur", release);
 });
 </script>
 <template>
   <Teleport to="body">
+    <Transition name="fish-ghost">
+      <div v-if="ghostVisible" class="fish-ghost-bubble" aria-hidden="true"
+        :style="{ bottom: `${playerHeight + 16}px`, '--mouth-cycle': beatFrequency > 0 ? `${1 / beatFrequency}s` : '0s' }">
+        <svg viewBox="0 0 300 230">
+          <use :href="`#${previewId}`" />
+        </svg>
+      </div>
+    </Transition>
     <div class="fish-trail" aria-hidden="true">
       <span
         v-for="bubble in trailBubbles"
@@ -519,7 +621,6 @@ onBeforeUnmount(() => {
         singing: playing,
       }"
       :style="{
-        transform: `translate(${offset.x}px, ${offset.y}px)`,
         '--swim-speed': '0.4s',
         '--vibration-strength': `${vibration.strength}px`,
         '--vibration-duration': `${vibration.duration}s`,
@@ -541,30 +642,18 @@ onBeforeUnmount(() => {
         aria-label="Bass with sawtooth fins, shaped by your sound"
       >
         <g class="fish-swim" :style="{ transformOrigin: '150px 135px' }">
-          <g
-            class="fish-heading"
-            :style="{
-              transform: `scaleX(${heading.right ? -1 : 1})`,
-              rotate: `${heading.angle}deg`,
-            }"
-          >
-            <g
-              class="fish-propulsion"
-              :style="{
-                transform: `translateY(${returnStroke.sway}px) rotate(${returnStroke.yaw}deg)`,
-              }"
-            >
+          <g ref="headingNode" class="fish-heading">
+            <g ref="propulsionNode" class="fish-propulsion">
               <g class="fish-vibration">
                 <g
                   :transform="`translate(${150 * (1 - bodyScale)} ${115 * (1 - bodyScale)}) scale(${bodyScale})`"
                 >
-                  <g class="fish-centering" :transform="centerTransform">
+                  <g ref="centering" :id="previewId" class="fish-centering">
                   <FishBody
                     :body="body" :dark="dark" :light="light"
                     :eyes="eyes" :mouth="mouth" :dorsal="dorsal" :tail="tail"
                     :body-length="bodyLength" :fins="fins" :speckles="speckles"
                     :dragging="dragging" :gaze="gaze" :playing="playing" :beat-frequency="beatFrequency"
-                    :returning="returning" :return-stroke="returnStroke"
                   />
                   </g>
                 </g>
