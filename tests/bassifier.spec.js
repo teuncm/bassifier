@@ -2149,7 +2149,7 @@ test("mobile sharing opens native share and octave shortcuts highlight their but
   await page.addInitScript(() => Object.defineProperty(navigator, 'share', {value: async data => {window.nativeShare = data;}}));
   await page.goto(shared());
   await page.getByRole('button', {name:'Share your bass', exact:true}).click();
-  expect(await page.evaluate(() => window.nativeShare.url)).toContain('p=17');
+  expect(new URL(await page.evaluate(() => window.nativeShare.url)).searchParams.get('p')).toMatch(/^1,/);
   for (const [key, name] of [['z','Lower octave'],['x','Higher octave']]) {
     await page.keyboard.down(key);
     await expect(page.getByRole('button', {name,exact:true})).toHaveClass(/keyboard-pressed/);
@@ -2711,4 +2711,56 @@ test.describe('visual work budgets', () => {
     await page.waitForTimeout(160);
     expect(await page.evaluate(()=>window.workCounts)).toEqual(stopped);
   });
+});
+
+
+test('social cards and SEO metadata are available in the initial HTML with valid assets', async ({page,request}) => {
+  const response=await request.get(shared());
+  expect(response.status()).toBe(200);
+  const metadata=await page.evaluate(source=>{
+    const doc=new DOMParser().parseFromString(source,'text/html');
+    const content=key=>doc.querySelector(`meta[property="${key}"],meta[name="${key}"]`)?.content;
+    return {title:doc.title,description:content('description'),canonical:doc.querySelector('link[rel="canonical"]')?.getAttribute('href'),
+      ogUrl:content('og:url'),image:content('og:image'),width:content('og:image:width'),height:content('og:image:height'),
+      imageAlt:content('og:image:alt'),card:content('twitter:card'),twitterImage:content('twitter:image'),robots:content('robots'),
+      schema:JSON.parse(doc.querySelector('script[type="application/ld+json"]').textContent),fallback:doc.querySelector('#app').textContent};
+  },await response.text());
+  expect(metadata.title).toBe('Bassifier — Free Online Bass Synthesizer');
+  expect(metadata.description.length).toBeGreaterThan(100);
+  expect(metadata.description.length).toBeLessThanOrEqual(160);
+  expect(metadata.canonical).toBe('https://teuncm.nl/bassifier/');
+  expect(metadata.ogUrl).toBe(metadata.canonical);
+  expect(metadata.image).toBe('https://teuncm.nl/bassifier/social-card.png');
+  expect(metadata.twitterImage).toBe(metadata.image);
+  expect(metadata.imageAlt).toContain('cartoon bass fish');
+  expect(metadata.card).toBe('summary_large_image');
+  expect(metadata.robots).toContain('max-image-preview:large');
+  expect(metadata.schema['@type']).toBe('WebApplication');
+  expect(metadata.schema.url).toBe(metadata.canonical);
+  expect(metadata.schema.offers.price).toBe('0');
+  expect(metadata.schema.isAccessibleForFree).toBe(true);
+  expect(metadata.fallback).toContain('five sawtooth voices');
+  expect(metadata.fallback).toContain('30-second stereo WAV');
+  const image=await request.get('/social-card.png'), png=await image.body();
+  expect(image.headers()['content-type']).toContain('image/png');
+  expect(png.readUInt32BE(16)).toBe(Number(metadata.width));
+  expect(png.readUInt32BE(20)).toBe(Number(metadata.height));
+  expect(png.length).toBeLessThan(300000);
+  const touch=await (await request.get('/apple-touch-icon.png')).body();
+  expect(touch.readUInt32BE(16)).toBe(180);expect(touch.readUInt32BE(20)).toBe(180);
+  const sitemap=await request.get('/sitemap.xml');
+  const urls=await page.evaluate(source=>[...new DOMParser().parseFromString(source,'application/xml').querySelectorAll('loc')].map(node=>node.textContent),await sitemap.text());
+  expect(urls).toEqual([metadata.canonical]);
+});
+
+
+test('visitors without JavaScript receive useful accessible synth information', async ({browser},testInfo) => {
+  const context=await browser.newContext({baseURL:testInfo.project.use.baseURL,javaScriptEnabled:false});
+  try {
+    const page=await context.newPage();await page.goto('/');
+    await expect(page.getByRole('heading',{level:1})).toHaveText('Bassifier — free online bass synthesizer');
+    await expect(page.getByRole('main')).toContainText('five sawtooth voices');
+    await expect(page.getByRole('main')).toContainText('Enable JavaScript to play');
+    await expect(page.getByRole('link',{name:'Teun M.'})).toHaveAttribute('href','https://teuncm.nl/');
+  }finally{await context.close();}
 });

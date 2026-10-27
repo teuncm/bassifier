@@ -2,21 +2,56 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/svg+xml" sizes="any" href="./favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <link rel="canonical" href="https://teuncm.nl/bassifier/" />
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#f7f0ee" />
     <meta
       name="description"
-      content="Unison bass synthesizer with up to five sawtooth voices, white noise, low-pass resonance, drive, and MIDI piano."
+      content="Create big bass sounds in your browser. Play a stereo unison synth, shape noise and distortion, randomize sounds, and download WAV samples. Free, no install."
     />
     <meta name="author" content="Teun M." />
-    <meta property="og:title" content="Bassifier" />
+    <meta name="application-name" content="Bassifier" />
+    <meta name="apple-mobile-web-app-title" content="Bassifier" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta property="og:title" content="Bassifier — Free Online Bass Synthesizer" />
     <meta
       property="og:description"
-      content="Unison bass synthesizer with up to five sawtooth voices, white noise, low-pass resonance, drive, and MIDI piano."
+      content="Big bass. Little fish. Play with unison, noise and distortion, randomize your sound, and download WAV samples. Free, right in your browser."
     />
     <meta property="og:type" content="website" />
-    <title>Bassifier</title>
+    <meta property="og:site_name" content="Bassifier" />
+    <meta property="og:url" content="https://teuncm.nl/bassifier/" />
+    <meta property="og:image" content="https://teuncm.nl/bassifier/social-card.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Bassifier: a red cartoon bass fish beside an audio waveform. Big bass. Little fish." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Bassifier — Free Online Bass Synthesizer" />
+    <meta name="twitter:description" content="Big bass. Little fish. Play, randomize, and download your own bass sounds. Free, right in your browser." />
+    <meta name="twitter:image" content="https://teuncm.nl/bassifier/social-card.png" />
+    <meta name="twitter:image:alt" content="Bassifier: a red cartoon bass fish beside an audio waveform. Big bass. Little fish." />
+    <title>Bassifier — Free Online Bass Synthesizer</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "Bassifier",
+        "url": "https://teuncm.nl/bassifier/",
+        "description": "A free online bass synthesizer with stereo unison, white noise, resonant low-pass filtering, distortion, a playable keyboard, and WAV downloads.",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and a browser with Web Audio support.",
+        "inLanguage": "en",
+        "isAccessibleForFree": true,
+        "image": "https://teuncm.nl/bassifier/social-card.png",
+        "author": { "@type": "Person", "name": "Teun M.", "url": "https://teuncm.nl/" },
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" }
+      }
+    </script>
     <script>
       (() => {
         let theme;
@@ -35,15 +70,18 @@
   </head>
   <body>
     <div id="app">
-      <h1>Bassifier</h1>
-      <p>
-        Bass synthesizer by
-        <a href="https://teuncm.nl/">Teun M.</a>.
-      </p>
-      <noscript
-        >Enable JavaScript to play the synthesizer. All sound is generated in
-        your browser.</noscript
-      >
+      <noscript>
+      <main>
+        <h1>Bassifier — free online bass synthesizer</h1>
+        <p>Create big bass sounds in your browser. Free to play, with no installation or account required.</p>
+        <h2>Play and shape your sound</h2>
+        <p>Layer up to five sawtooth voices with stereo unison, detune, white noise, a resonant low-pass filter, and parabolic distortion. Play using your computer keyboard, mouse, touch screen, or a compatible MIDI keyboard.</p>
+        <h2>Randomize, download, and share</h2>
+        <p>Discover new sounds with Randomize, lock your favorite settings, and watch a playful fish change with your sound. Explore the live waveform and spectrum, download 3-second or 30-second stereo WAV samples, and share a link to your bass.</p>
+        <p>Created by <a href="https://teuncm.nl/">Teun M.</a>.</p>
+        <p>Enable JavaScript to play the synthesizer. All sound is generated in your browser.</p>
+      </main>
+      </noscript>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

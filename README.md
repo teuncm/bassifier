@@ -101,7 +101,7 @@ Requires Node `^22.18.0 || >=24.12.0`. Production output is in `dist/` with rela
 
 `.github/workflows/pages.yml` installs locked dependencies, runs unit tests, builds `dist/`, and deploys on pushes to `main`. It can also be run manually from Actions on `main`.
 
-In [repository Pages settings](https://github.com/teuncm/bassifier/settings/pages), choose **GitHub Actions** as the publishing source. Configure `teuncm.nl` as the custom domain there and point its DNS at GitHub Pages if not already configured. The workflow does not change domain or DNS settings.
+In [repository Pages settings](https://github.com/teuncm/bassifier/settings/pages), choose **GitHub Actions** as the publishing source. The public URL is `https://teuncm.nl/bassifier/`; the workflow does not change domain or DNS settings.
 
 Vite already uses `base: "./"`, so built assets work at either a custom-domain root or the repository's Pages path. A `CNAME` file is unnecessary for this Actions deployment; custom domains are managed through Pages settings. See [GitHub's custom-domain instructions](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site).
 
@@ -140,3 +140,21 @@ Center the visible fish geometry horizontally and vertically for every body size
 
 
 Noise is centered mono, bypassing Low pass before entering Drive.
+
+
+## Search and social previews
+
+The initial HTML includes a descriptive title, meta description, canonical URL,
+Open Graph/X large-image cards, WebApplication JSON-LD, and useful fallback content
+for visitors and crawlers without JavaScript. Preset query URLs use the base app
+as their canonical page. The shared preset URL itself still carries its settings.
+
+`public/social-card.png` is a checked-in 1200x630 preview with editable SVG source.
+Regenerate it and the touch/favicon assets with `node scripts/generate-social-card.mjs`
+(requires Chrome and development dependencies). Production builds copy the assets;
+they do not launch a browser.
+
+The sitemap is published at `https://teuncm.nl/bassifier/sitemap.xml`. Submit that
+URL in Search Console after deployment. A robots.txt under `/bassifier/` would not
+control crawling: robots policy belongs to `https://teuncm.nl/robots.txt`, managed
+by the domain's root site. This project leaves that site's policy untouched.
