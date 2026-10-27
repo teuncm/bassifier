@@ -97,6 +97,14 @@ npm test
 
 Requires Node `^22.18.0 || >=24.12.0`. Production output is in `dist/` with relative asset URLs.
 
+## GitHub Pages
+
+`.github/workflows/pages.yml` installs locked dependencies, runs unit tests, builds `dist/`, and deploys on pushes to `main`. It can also be run manually from Actions on `main`.
+
+In [repository Pages settings](https://github.com/teuncm/bassifier/settings/pages), choose **GitHub Actions** as the publishing source. Configure `teuncm.nl` as the custom domain there and point its DNS at GitHub Pages if not already configured. The workflow does not change domain or DNS settings.
+
+Vite already uses `base: "./"`, so built assets work at either a custom-domain root or the repository's Pages path. A `CNAME` file is unnecessary for this Actions deployment; custom domains are managed through Pages settings. See [GitHub's custom-domain instructions](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site).
+
 Tests use Node and Playwright with installed Chrome. Set `BASSIFIER_TEST_CHANNEL=msedge` for Edge, or `BASSIFIER_TEST_URL` to use an already-running Vite development server. Otherwise tests start a server on port 5187. Automated MIDI tests emulate hardware.
 
 The original reference is [REQUIREMENTS-birbifier.md](REQUIREMENTS-birbifier.md). Current scope is in [REQUIREMENTS-bassifier.md](REQUIREMENTS-bassifier.md).
